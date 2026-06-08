@@ -152,7 +152,7 @@ def _write_capture(path, data):
     tmp.replace(path)
 
 
-def _save_capture_file(name, cfg, packets, preview=False, folder=""):
+def _save_capture_file(name, cfg, packets, preview=False, folder="", events=None, signal_type="decoded"):
     ts = int(time.time())
     safe_name = _sanitize_name(name)
     capture_id = f"{safe_name}_{ts}"
@@ -166,6 +166,8 @@ def _save_capture_file(name, cfg, packets, preview=False, folder=""):
         "note": "",
         "preview": preview,
         "folder": folder,
+        "signal_type": signal_type,
+        "events": events or [],
         "packets": packets,
     })
     return capture_id
@@ -211,6 +213,8 @@ def _decode_capture(data):
         "frequency": data.get("frequency", 0),
         "modulation": data.get("modulation", ""),
         "symbol_rate": data.get("symbol_rate", 0),
+        "signal_type": data.get("signal_type", "decoded"),
+        "events": data.get("events", []),
         "packet_count": len(packets),
         "lengths": lengths,
         "unique_payloads": len(grouped),
@@ -336,9 +340,32 @@ def _run_monitor(cfg):
 def _run_auto_capture(cfg, threshold, quiet_ms, prebuffer_ms, auto_tune, tune_ms, margin_db):
     global _auto_running
     burst_packets = []
+    burst_events = []
     prebuffer = []
     triggered = False
     last_activity = 0
+    def save_burst_preview():
+        if not burst_packets and not burst_events:
+            return None
+        signal_type = "decoded" if burst_packets else "rssi_only"
+        capture_id = _save_capture_file(
+            "auto_preview",
+            cfg,
+            burst_packets,
+            preview=True,
+            folder="Previews",
+            events=burst_events,
+            signal_type=signal_type,
+        )
+        _sse_push({
+            "type": "auto",
+            "state": "saved",
+            "id": capture_id,
+            "packets": len(burst_packets),
+            "events": len(burst_events),
+            "signal_type": signal_type,
+        })
+        return capture_id
     try:
         if cc1101 is None:
             raise RuntimeError(f"cc1101 package unavailable: {CC1101_IMPORT_ERROR}")
@@ -371,6 +398,7 @@ def _run_auto_capture(cfg, threshold, quiet_ms, prebuffer_ms, auto_tune, tune_ms
                 pkt = t._get_received_packet()
                 rssi = _read_rssi_dbm(t)
                 active = rssi >= threshold
+                event = {"ts": now, "rssi": rssi}
                 with _lock:
                     _state["rssi"] = rssi
                 _sse_push({"type": "rssi", "value": rssi, "auto": True})
@@ -396,6 +424,7 @@ def _run_auto_capture(cfg, threshold, quiet_ms, prebuffer_ms, auto_tune, tune_ms
                     if not triggered:
                         triggered = True
                         burst_packets = list(prebuffer)
+                        burst_events = []
                         if burst_packets:
                             with _lock:
                                 _state["packets"].extend(burst_packets)
@@ -403,20 +432,16 @@ def _run_auto_capture(cfg, threshold, quiet_ms, prebuffer_ms, auto_tune, tune_ms
                                 _sse_push({"type": "packet", **entry})
                         _sse_push({"type": "auto", "state": "triggered", "rssi": rssi})
                     last_activity = now
+                if triggered:
+                    burst_events.append(event)
                 if triggered and (now - last_activity) * 1000 >= quiet_ms:
-                    if burst_packets:
-                        capture_id = _save_capture_file("auto_preview", cfg, burst_packets, preview=True, folder="Previews")
-                        _sse_push({
-                            "type": "auto",
-                            "state": "saved",
-                            "id": capture_id,
-                            "packets": len(burst_packets),
-                        })
-                    else:
-                        _sse_push({"type": "auto", "state": "quiet"})
+                    save_burst_preview()
                     triggered = False
                     burst_packets = []
+                    burst_events = []
                 time.sleep(0.05)
+            if triggered:
+                save_burst_preview()
     except Exception as exc:
         msg = str(exc)
         with _lock:
@@ -707,6 +732,8 @@ def api_capture_save():
         "note": "",
         "preview": False,
         "folder": "",
+        "signal_type": "decoded",
+        "events": [],
         "packets": packets,
     }
     _write_capture(path, payload)
@@ -723,6 +750,9 @@ def api_captures():
                 data = json.load(fh)
         except Exception:
             continue
+        packets = data.get("packets", [])
+        events = data.get("events", [])
+        rssi_values = [pkt.get("rssi", -120) for pkt in packets] + [evt.get("rssi", -120) for evt in events]
         items.append({
             "id": path.stem,
             "name": data.get("name", path.stem),
@@ -730,11 +760,15 @@ def api_captures():
             "frequency": data.get("frequency", 0),
             "modulation": data.get("modulation", ""),
             "symbol_rate": data.get("symbol_rate", 0),
-            "packet_count": len(data.get("packets", [])),
+            "packet_count": len(packets),
+            "event_count": len(events),
+            "max_rssi": max(rssi_values) if rssi_values else -120,
+            "signal_type": data.get("signal_type", "decoded"),
             "note": data.get("note", ""),
             "preview": bool(data.get("preview", False)),
             "folder": data.get("folder", "Previews" if data.get("preview", False) else ""),
-            "packets": data.get("packets", []),
+            "packets": packets,
+            "events": events,
         })
     items.sort(key=lambda item: item.get("ts", 0), reverse=True)
     return jsonify(items)

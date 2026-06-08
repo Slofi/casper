@@ -172,11 +172,11 @@ function startSse() {
       if (data.state === "tuned") $("auto-status").textContent = `Armed: floor ${Math.round(data.floor)} dBm, trigger ${Math.round(data.threshold)} dBm`;
       if (data.state === "triggered") $("auto-status").textContent = `Triggered at ${Math.round(data.rssi)} dBm`;
       if (data.state === "saved") {
-        $("auto-status").textContent = `Preview saved ${data.id} (${data.packets} packets)`;
+        const kind = data.signal_type === "rssi_only" ? "RSSI-only preview" : "Decoded preview";
+        $("auto-status").textContent = `${kind} saved ${data.id} (${data.packets} packets, ${data.events || 0} samples)`;
         loadPreviews();
         loadLibrary();
       }
-      if (data.state === "quiet") $("auto-status").textContent = "Signal ended, no packet decoded";
     }
     if (data.type === "error") {
       setMessage("capture-error", data.msg, true);
@@ -305,8 +305,20 @@ function formatDate(ts) {
 function formatDecode(data) {
   const lines = [];
   lines.push(`${data.name || "capture"} · ${Number(data.frequency).toFixed(2)} MHz · ${data.modulation} · ${data.symbol_rate} baud`);
-  lines.push(`${data.packet_count} packets · ${data.unique_payloads} unique payloads · lengths: ${data.lengths.join(", ") || "none"}`);
+  lines.push(`${data.packet_count} packets · ${data.events.length} RSSI samples · ${data.unique_payloads} unique payloads · lengths: ${data.lengths.join(", ") || "none"}`);
+  if (data.signal_type === "rssi_only") {
+    lines.push("RSSI-only activity: signal energy was detected, but no packet payload was decoded. This can be reviewed and kept, but it is not replayable.");
+  }
   lines.push("");
+  if (!data.packets.length && data.events.length) {
+    lines.push("RSSI activity:");
+    const base = data.events[0]?.ts || 0;
+    data.events.slice(0, 80).forEach((evt, index) => {
+      lines.push(`#${index}  +${Math.round((evt.ts - base) * 1000)}ms  ${Math.round(evt.rssi)} dBm`);
+    });
+    if (data.events.length > 80) lines.push(`... ${data.events.length - 80} more samples not shown`);
+    return lines.join("\n");
+  }
   if (data.repeats.length) {
     lines.push("Repeated payloads:");
     data.repeats.slice(0, 8).forEach((item) => {
@@ -338,6 +350,10 @@ async function decodeCapture(capture) {
 }
 
 async function keepCapture(capture) {
+  if (capture.signal_type === "rssi_only") {
+    const ok = confirm("This preview has RSSI activity but no decoded payload, so it cannot be replayed. Keep it in the Library as a signal note?");
+    if (!ok) return;
+  }
   const name = prompt("Save preview as:", capture.name.replace(/^auto_preview/, "capture"));
   if (name === null) return;
   try {
@@ -375,12 +391,13 @@ async function loadPreviews() {
   tbody.innerHTML = "";
   empty.classList.toggle("hidden", state.pendingPreviews.length !== 0);
   for (const cap of state.pendingPreviews) {
-    const maxRssi = cap.packets.length ? Math.max(...cap.packets.map((pkt) => Number(pkt.rssi) || -120)) : -120;
+    const maxRssi = Number(cap.max_rssi ?? -120);
+    const typeLabel = cap.signal_type === "rssi_only" ? "RSSI-only" : "Decoded";
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${formatDate(cap.ts)}</td>
       <td>${Math.round(maxRssi)} dBm</td>
-      <td>${cap.packet_count}</td>
+      <td>${typeLabel}: ${cap.packet_count || cap.event_count}</td>
       <td>${Number(cap.frequency).toFixed(2)}</td>
       <td><div class="inline">
         <button class="btn small review">Review</button>
