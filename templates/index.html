@@ -104,6 +104,8 @@
         </div>
         <div class="auto-settings">
           <label>Trigger <input id="auto-threshold" type="number" min="-120" max="0" value="-85"> dBm</label>
+          <label><input id="auto-tune" type="checkbox" checked> Auto tune</label>
+          <label>Margin <input id="auto-margin" type="number" min="3" max="40" value="12"> dB</label>
           <label>Prebuffer <input id="auto-prebuffer" type="number" min="0" max="10000" step="100" value="3000"> ms</label>
           <label>Quiet <input id="auto-quiet" type="number" min="300" max="10000" step="100" value="1500"> ms</label>
           <span id="auto-status">Auto idle</span>
@@ -141,6 +143,7 @@
         <h2>Library</h2>
         <button id="refresh-library" class="btn small">Refresh</button>
       </div>
+      <div id="folder-tabs" class="folder-tabs"></div>
       <div id="library-list" class="library-list"></div>
       <div id="library-empty" class="empty hidden">No captures saved yet. Go capture something.</div>
       <div id="decode-panel" class="panel decode-panel hidden">

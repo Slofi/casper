@@ -244,9 +244,19 @@ code, .hex { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospa
   margin: 0;
 }
 .auto-settings input { width: 86px; }
+.auto-settings input[type="checkbox"] { width: auto; }
 #auto-status {
   color: var(--accent-muted);
   font-variant-numeric: tabular-nums;
+}
+.capture-card.preview {
+  border-color: var(--accent-mid);
+  background: linear-gradient(180deg, rgba(232,176,79,0.08), var(--bg2));
+}
+.preview-badge {
+  border-color: var(--accent);
+  color: #111;
+  background: var(--accent);
 }
 .rssi-head { display: flex; justify-content: space-between; color: var(--text-muted); margin: 10px 0 6px; font-variant-numeric: tabular-nums; }
 .rssi-track { height: 8px; border-radius: 4px; background: var(--bg3); overflow: hidden; }
@@ -286,10 +296,44 @@ td:nth-child(5) { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, mo
 .save-panel { margin-top: 8px; }
 
 .library-list { display: grid; gap: 10px; }
+.folder-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 0 0 10px;
+}
+.folder-tab {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 9px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.75rem;
+}
+.folder-tab.active {
+  background: var(--accent-bg);
+  border-color: var(--accent-mid);
+  color: var(--accent);
+}
 .capture-card { display: grid; gap: 8px; }
 .capture-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .capture-name { font-weight: 700; }
 .capture-time { color: var(--text-muted); font-size: 0.84rem; }
+.folder-field, .note-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+.note-field {
+  display: grid;
+  align-items: stretch;
+  gap: 5px;
+}
+.folder-field input { width: min(240px, 100%); }
 .decode-panel { margin-top: 10px; }
 #decode-output {
   max-height: 360px;

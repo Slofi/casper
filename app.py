@@ -118,6 +118,12 @@ def _sanitize_name(name):
     return clean[:48] or "capture"
 
 
+def _sanitize_folder(folder):
+    clean = re.sub(r"[^\w\- ]", "", (folder or "").strip())
+    clean = re.sub(r"\s+", " ", clean)
+    return clean[:48]
+
+
 def _capture_path(capture_id):
     safe_id = re.sub(r"[^\w\-.]", "", capture_id or "")
     if not safe_id or safe_id != capture_id or safe_id.endswith(".json"):
@@ -146,7 +152,7 @@ def _write_capture(path, data):
     tmp.replace(path)
 
 
-def _save_capture_file(name, cfg, packets):
+def _save_capture_file(name, cfg, packets, preview=False, folder=""):
     ts = int(time.time())
     safe_name = _sanitize_name(name)
     capture_id = f"{safe_name}_{ts}"
@@ -158,6 +164,8 @@ def _save_capture_file(name, cfg, packets):
         "modulation": cfg["modulation"],
         "symbol_rate": cfg["symbol_rate"],
         "note": "",
+        "preview": preview,
+        "folder": folder,
         "packets": packets,
     })
     return capture_id
@@ -325,7 +333,7 @@ def _run_monitor(cfg):
         _monitor_running = False
 
 
-def _run_auto_capture(cfg, threshold, quiet_ms, prebuffer_ms):
+def _run_auto_capture(cfg, threshold, quiet_ms, prebuffer_ms, auto_tune, tune_ms, margin_db):
     global _auto_running
     burst_packets = []
     prebuffer = []
@@ -337,6 +345,27 @@ def _run_auto_capture(cfg, threshold, quiet_ms, prebuffer_ms):
         with cc1101.CC1101() as t:
             _apply_config(t, cfg)
             _enter_receive_mode(t)
+            if auto_tune:
+                samples = []
+                deadline = time.time() + (tune_ms / 1000)
+                _sse_push({"type": "auto", "state": "tuning"})
+                while _auto_running and time.time() < deadline:
+                    rssi = _read_rssi_dbm(t)
+                    samples.append(rssi)
+                    with _lock:
+                        _state["rssi"] = rssi
+                    _sse_push({"type": "rssi", "value": rssi, "auto": True})
+                    time.sleep(0.1)
+                if samples:
+                    samples.sort()
+                    median = samples[len(samples) // 2]
+                    threshold = max(-120, min(0, median + margin_db))
+                    _sse_push({
+                        "type": "auto",
+                        "state": "tuned",
+                        "floor": median,
+                        "threshold": threshold,
+                    })
             while _auto_running:
                 now = time.time()
                 pkt = t._get_received_packet()
@@ -376,7 +405,7 @@ def _run_auto_capture(cfg, threshold, quiet_ms, prebuffer_ms):
                     last_activity = now
                 if triggered and (now - last_activity) * 1000 >= quiet_ms:
                     if burst_packets:
-                        capture_id = _save_capture_file("auto", cfg, burst_packets)
+                        capture_id = _save_capture_file("auto_preview", cfg, burst_packets, preview=True, folder="Previews")
                         _sse_push({
                             "type": "auto",
                             "state": "saved",
@@ -575,11 +604,16 @@ def api_auto_start():
         threshold = float(body.get("threshold", -85))
         quiet_ms = int(body.get("quiet_ms", 1500))
         prebuffer_ms = int(body.get("prebuffer_ms", 3000))
+        tune_ms = int(body.get("tune_ms", 2500))
+        margin_db = float(body.get("margin_db", 12))
     except (TypeError, ValueError):
         return jsonify({"error": "invalid auto settings"}), 400
+    auto_tune = bool(body.get("auto_tune", True))
     threshold = max(-120, min(0, threshold))
     quiet_ms = max(300, min(10000, quiet_ms))
     prebuffer_ms = max(0, min(10000, prebuffer_ms))
+    tune_ms = max(500, min(10000, tune_ms))
+    margin_db = max(3, min(40, margin_db))
     with _lock:
         if _state["capturing"] or _state["monitoring"]:
             return jsonify({"error": "stop capture or monitor before auto mode"}), 409
@@ -590,7 +624,11 @@ def api_auto_start():
         _state["auto_armed"] = True
         _state["last_error"] = ""
     _auto_running = True
-    _auto_thread = threading.Thread(target=_run_auto_capture, args=(cfg, threshold, quiet_ms, prebuffer_ms), daemon=True)
+    _auto_thread = threading.Thread(
+        target=_run_auto_capture,
+        args=(cfg, threshold, quiet_ms, prebuffer_ms, auto_tune, tune_ms, margin_db),
+        daemon=True,
+    )
     _auto_thread.start()
     return jsonify({"ok": True})
 
@@ -667,6 +705,8 @@ def api_capture_save():
         "modulation": cfg["modulation"],
         "symbol_rate": cfg["symbol_rate"],
         "note": "",
+        "preview": False,
+        "folder": "",
         "packets": packets,
     }
     _write_capture(path, payload)
@@ -692,6 +732,8 @@ def api_captures():
             "symbol_rate": data.get("symbol_rate", 0),
             "packet_count": len(data.get("packets", [])),
             "note": data.get("note", ""),
+            "preview": bool(data.get("preview", False)),
+            "folder": data.get("folder", "Previews" if data.get("preview", False) else ""),
             "packets": data.get("packets", []),
         })
     items.sort(key=lambda item: item.get("ts", 0), reverse=True)
@@ -705,6 +747,34 @@ def api_capture_note(capture_id):
         return jsonify({"error": "capture not found"}), 404
     body = request.get_json(silent=True) or {}
     data["note"] = str(body.get("note", ""))[:2000]
+    _write_capture(path, data)
+    return jsonify({"ok": True})
+
+
+@app.post("/api/captures/<capture_id>/folder")
+def api_capture_folder(capture_id):
+    path, data = _read_capture(capture_id)
+    if path is None:
+        return jsonify({"error": "capture not found"}), 404
+    body = request.get_json(silent=True) or {}
+    folder = _sanitize_folder(str(body.get("folder", "")))
+    data["folder"] = "" if folder.lower() in {"", "none", "root"} else folder
+    _write_capture(path, data)
+    return jsonify({"ok": True, "folder": data["folder"]})
+
+
+@app.post("/api/captures/<capture_id>/keep")
+def api_capture_keep(capture_id):
+    path, data = _read_capture(capture_id)
+    if path is None:
+        return jsonify({"error": "capture not found"}), 404
+    body = request.get_json(silent=True) or {}
+    name = body.get("name")
+    if name:
+        data["name"] = _sanitize_name(name)
+    data["preview"] = False
+    if data.get("folder") == "Previews":
+        data["folder"] = ""
     _write_capture(path, data)
     return jsonify({"ok": True})
 

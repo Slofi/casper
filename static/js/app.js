@@ -8,6 +8,7 @@ const state = {
   eventSource: null,
   rssiSamples: [],
   peakRssi: -120,
+  activeFolder: "All",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -166,8 +167,13 @@ function startSse() {
       addRssiSample(data.rssi);
     }
     if (data.type === "auto") {
+      if (data.state === "tuning") $("auto-status").textContent = "Measuring noise floor...";
+      if (data.state === "tuned") $("auto-status").textContent = `Armed: floor ${Math.round(data.floor)} dBm, trigger ${Math.round(data.threshold)} dBm`;
       if (data.state === "triggered") $("auto-status").textContent = `Triggered at ${Math.round(data.rssi)} dBm`;
-      if (data.state === "saved") $("auto-status").textContent = `Saved ${data.id} (${data.packets} packets)`;
+      if (data.state === "saved") {
+        $("auto-status").textContent = `Preview saved ${data.id} (${data.packets} packets)`;
+        loadLibrary();
+      }
       if (data.state === "quiet") $("auto-status").textContent = "Signal ended, no packet decoded";
     }
     if (data.type === "error") {
@@ -237,6 +243,8 @@ async function startAuto() {
       method: "POST",
       body: {
         threshold: Number($("auto-threshold").value),
+        auto_tune: $("auto-tune").checked,
+        margin_db: Number($("auto-margin").value),
         prebuffer_ms: Number($("auto-prebuffer").value),
         quiet_ms: Number($("auto-quiet").value),
       },
@@ -327,9 +335,21 @@ async function decodeCapture(capture) {
   }
 }
 
+async function keepCapture(capture) {
+  const name = prompt("Save preview as:", capture.name.replace(/^auto_preview/, "capture"));
+  if (name === null) return;
+  try {
+    await api(`/api/captures/${encodeURIComponent(capture.id)}/keep`, { method: "POST", body: { name } });
+    await loadLibrary();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
 async function loadLibrary() {
   const list = $("library-list");
   const empty = $("library-empty");
+  const foldersEl = $("folder-tabs");
   list.innerHTML = "";
   try {
     state.captures = await api("/api/captures");
@@ -338,22 +358,41 @@ async function loadLibrary() {
     empty.classList.remove("hidden");
     return;
   }
-  empty.classList.toggle("hidden", state.captures.length !== 0);
-  for (const cap of state.captures) {
+  const folders = ["All", "Previews", ...new Set(state.captures.map((cap) => cap.folder || "Unfiled").filter((name) => name !== "Previews"))];
+  if (!folders.includes(state.activeFolder)) state.activeFolder = "All";
+  foldersEl.innerHTML = "";
+  folders.forEach((folder) => {
+    const btn = document.createElement("button");
+    btn.className = `folder-tab${state.activeFolder === folder ? " active" : ""}`;
+    btn.textContent = folder;
+    btn.addEventListener("click", () => {
+      state.activeFolder = folder;
+      loadLibrary();
+    });
+    foldersEl.append(btn);
+  });
+  const visible = state.captures.filter((cap) => {
+    const folder = cap.preview ? "Previews" : (cap.folder || "Unfiled");
+    return state.activeFolder === "All" || state.activeFolder === folder;
+  });
+  empty.classList.toggle("hidden", visible.length !== 0);
+  for (const cap of visible) {
     const card = document.createElement("article");
-    card.className = "panel capture-card";
+    card.className = `panel capture-card${cap.preview ? " preview" : ""}`;
     card.innerHTML = `
       <div class="capture-card-head">
         <span class="capture-name">${cap.name}</span>
+        ${cap.preview ? '<span class="badge preview-badge">PREVIEW</span>' : ""}
         <span class="badge">${Number(cap.frequency).toFixed(2)} MHz · ${cap.modulation}</span>
         <span class="badge">${cap.packet_count} packets</span>
       </div>
       <div class="capture-time">${formatDate(cap.ts)}</div>
-      <textarea rows="2" placeholder="Add a note...">${cap.note || ""}</textarea>
+      <label class="folder-field">Folder <input class="folder-input" type="text" value="${cap.folder || ""}" placeholder="Unfiled"></label>
+      <label class="note-field">Note <textarea rows="2" placeholder="Add a note...">${cap.note || ""}</textarea></label>
       <div class="inline">
-        <button class="btn primary load">Load for Replay</button>
+        ${cap.preview ? '<button class="btn primary keep">Keep</button>' : '<button class="btn primary load">Load for Replay</button>'}
         <button class="btn decode">Decode</button>
-        <button class="btn danger delete">Delete</button>
+        <button class="btn danger delete">${cap.preview ? "Discard" : "Delete"}</button>
       </div>`;
     card.querySelector("textarea").addEventListener("blur", async (event) => {
       try {
@@ -363,10 +402,21 @@ async function loadLibrary() {
         alert(err.message);
       }
     });
-    card.querySelector(".load").addEventListener("click", () => loadReplay(cap));
+    card.querySelector(".folder-input").addEventListener("blur", async (event) => {
+      try {
+        await api(`/api/captures/${encodeURIComponent(cap.id)}/folder`, { method: "POST", body: { folder: event.target.value } });
+        await loadLibrary();
+      } catch (err) {
+        alert(err.message);
+      }
+    });
+    const loadBtn = card.querySelector(".load");
+    const keepBtn = card.querySelector(".keep");
+    if (loadBtn) loadBtn.addEventListener("click", () => loadReplay(cap));
+    if (keepBtn) keepBtn.addEventListener("click", () => keepCapture(cap));
     card.querySelector(".decode").addEventListener("click", () => decodeCapture(cap));
     card.querySelector(".delete").addEventListener("click", async () => {
-      if (!confirm(`Delete ${cap.name}?`)) return;
+      if (!confirm(`${cap.preview ? "Discard preview" : "Delete capture"} ${cap.name}?`)) return;
       await api(`/api/captures/${encodeURIComponent(cap.id)}`, { method: "DELETE" });
       await loadLibrary();
     });
