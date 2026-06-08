@@ -241,6 +241,63 @@ function renderReplayDisabled() {
   $("replay-capture-note").textContent = state.capturing ? "Stop capture first" : "";
 }
 
+async function loadVersionStatus(checkRemote = false) {
+  const btn = $("check-update");
+  if (btn) btn.disabled = true;
+  if (checkRemote) $("version-summary").textContent = "Checking GitHub version...";
+  try {
+    const data = await api(`/api/version${checkRemote ? "?check=1" : ""}`);
+    const parts = [];
+    parts.push(`Current: ${data.current || "unknown"}`);
+    if (data.branch) parts.push(`Branch: ${data.branch}`);
+    if (data.latest) parts.push(`Latest: ${data.latest}`);
+    if (data.latest) parts.push(data.up_to_date ? "Up to date" : "Update available");
+    $("version-summary").textContent = parts.join(" · ");
+    if (data.remote_error) setMessage("update-status", `Version check warning: ${data.remote_error}`, true);
+    else if (checkRemote) setMessage("update-status", data.up_to_date ? "Already up to date." : "Update available.");
+  } catch (err) {
+    $("version-summary").textContent = "Version unavailable.";
+    setMessage("update-status", `Version check failed: ${err.message}`, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function updateApp() {
+  const btn = $("update-app");
+  btn.disabled = true;
+  $("restart-app").classList.add("hidden");
+  setMessage("update-status", "Updating from GitHub...");
+  $("update-log").hidden = true;
+  $("update-log").textContent = "";
+  try {
+    const data = await api("/api/update", { method: "POST" });
+    $("update-log").textContent = data.log || "";
+    $("update-log").hidden = !data.log;
+    setMessage("update-status", data.restart_required ? "Update applied. Restart Casper to run the new version." : "Already up to date.");
+    if (data.restart_required) $("restart-app").classList.remove("hidden");
+    await loadVersionStatus(false);
+  } catch (err) {
+    setMessage("update-status", `Update failed: ${err.message}`, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function restartApp() {
+  if (!confirm("Restart Casper now? The page will reload after the service comes back.")) return;
+  const btn = $("restart-app");
+  btn.disabled = true;
+  setMessage("update-status", "Restarting Casper service...");
+  try {
+    await api("/api/service/restart", { method: "POST" });
+    setTimeout(() => window.location.reload(), 3500);
+  } catch (err) {
+    btn.disabled = false;
+    setMessage("update-status", `Restart failed: ${err.message}`, true);
+  }
+}
+
 async function transmitReplay() {
   if (!state.loadedCapture) return;
   $("transmit").disabled = true;
@@ -285,6 +342,10 @@ $("refresh-library").addEventListener("click", loadLibrary);
 $("select-all").addEventListener("click", () => document.querySelectorAll("#replay-packets input").forEach((el) => { el.checked = true; }));
 $("select-none").addEventListener("click", () => document.querySelectorAll("#replay-packets input").forEach((el) => { el.checked = false; }));
 $("transmit").addEventListener("click", transmitReplay);
+$("check-update").addEventListener("click", () => loadVersionStatus(true));
+$("update-app").addEventListener("click", updateApp);
+$("restart-app").addEventListener("click", restartApp);
 
 refreshStatus();
+loadVersionStatus(false);
 setInterval(refreshStatus, 3000);

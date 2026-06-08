@@ -4,6 +4,7 @@ import json
 import os
 import queue
 import re
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -42,6 +43,55 @@ _state = {
 _capture_thread = None
 _capture_running = False
 _sse_clients = []
+
+
+def service_action_soon(action):
+    time.sleep(1)
+    subprocess.run(
+        ["systemctl", "--user", action, "casper.service"],
+        cwd=APP_DIR,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def run_git(args, timeout=20):
+    return subprocess.run(
+        ["git", *args],
+        cwd=APP_DIR,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=timeout,
+    )
+
+
+def git_version_payload(check_remote=False):
+    payload = {"ok": True, "is_git": (APP_DIR / ".git").exists()}
+    current = run_git(["rev-parse", "--short", "HEAD"])
+    branch = run_git(["rev-parse", "--abbrev-ref", "HEAD"])
+    remote = run_git(["config", "--get", "remote.origin.url"])
+    payload.update({
+        "current": current.stdout.strip() if current.returncode == 0 else "",
+        "branch": branch.stdout.strip() if branch.returncode == 0 else "",
+        "remote": remote.stdout.strip() if remote.returncode == 0 else "",
+    })
+    if not payload["is_git"] or current.returncode != 0:
+        payload["ok"] = False
+        payload["error"] = "Casper directory is not a usable git checkout."
+        return payload
+    if check_remote:
+        ref = payload["branch"] if payload["branch"] and payload["branch"] != "HEAD" else "main"
+        latest = run_git(["ls-remote", "origin", ref], timeout=20)
+        if latest.returncode == 0 and latest.stdout.strip():
+            full = latest.stdout.split()[0]
+            payload["latest"] = full[:7]
+            payload["up_to_date"] = full.startswith(payload["current"])
+        else:
+            payload["remote_error"] = latest.stdout.strip() or "Unable to check remote version."
+    return payload
 
 
 def _mod_map():
@@ -192,6 +242,39 @@ def api_status():
         "packet_count": packet_count,
         "error": chip.get("error", ""),
     })
+
+
+@app.get("/api/version")
+def api_version():
+    check_remote = request.args.get("check") in {"1", "true", "yes"}
+    return jsonify(git_version_payload(check_remote))
+
+
+@app.post("/api/update")
+def api_update_app():
+    with _lock:
+        if _state["capturing"]:
+            return jsonify({"ok": False, "error": "stop capture before updating"}), 409
+    try:
+        result = run_git(["pull", "--ff-only"], timeout=60)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    ok = result.returncode == 0
+    changed = ok and "Already up to date." not in result.stdout
+    return jsonify({
+        "ok": ok,
+        "log": result.stdout[-6000:],
+        "restart_required": changed,
+    }), (200 if ok else 500)
+
+
+@app.post("/api/service/restart")
+def api_restart_service():
+    with _lock:
+        if _state["capturing"]:
+            return jsonify({"ok": False, "error": "stop capture before restarting"}), 409
+    threading.Thread(target=service_action_soon, args=("restart",), daemon=True).start()
+    return jsonify({"ok": True, "message": "Restarting Casper service."})
 
 
 @app.post("/api/config")

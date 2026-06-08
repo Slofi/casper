@@ -190,6 +190,23 @@ code, .hex { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospa
 }
 .message { min-height: 20px; margin-top: 8px; color: var(--accent-muted); font-size: 0.85rem; }
 .message.error { color: var(--red); }
+.version-summary {
+  min-height: 18px;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  margin: 2px 0 8px;
+}
+#update-log {
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  padding: 8px;
+}
 .capture-actions, .tab-header, .capture-title {
   display: flex;
   align-items: center;
