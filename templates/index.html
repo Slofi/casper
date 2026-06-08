@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CASPER</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body>
+  <header id="toolbar">
+    <div class="brand"><span class="brand-icon">C</span><span>CASPER</span></div>
+    <nav class="main-tabs" aria-label="Casper tabs">
+      <button class="main-tab active" data-tab="config">CONFIG</button>
+      <button class="main-tab" data-tab="capture">CAPTURE</button>
+      <button class="main-tab" data-tab="library">LIBRARY</button>
+      <button class="main-tab" data-tab="replay">REPLAY</button>
+    </nav>
+    <div class="spacer"></div>
+    <div id="toolbar-status" class="toolbar-status"><span class="status-dot idle"></span><span id="toolbar-state">IDLE</span></div>
+  </header>
+
+  <main id="content">
+    <section id="tab-config" class="tab-pane active">
+      <div class="split">
+        <article class="panel">
+          <h2>Settings</h2>
+          <div class="field">
+            <label for="frequency">Frequency</label>
+            <div class="inline">
+              <input id="frequency" type="number" min="300" max="928" step="0.01" value="433.92">
+              <button class="btn small preset" data-frequency="433.92">433.92</button>
+              <button class="btn small preset" data-frequency="868.35">868.35</button>
+              <button class="btn small preset" data-frequency="315.00">315.00</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="modulation">Modulation</label>
+            <select id="modulation">
+              <option value="OOK">OOK/ASK</option>
+              <option value="FSK2">FSK 2-FSK</option>
+              <option value="GFSK">GFSK</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="symbol-rate">Symbol Rate</label>
+            <div class="inline">
+              <select id="symbol-rate">
+                <option value="1200">1200 baud</option>
+                <option value="2400">2400 baud</option>
+                <option value="4800" selected>4800 baud</option>
+                <option value="9600">9600 baud</option>
+                <option value="38400">38400 baud</option>
+                <option value="custom">Custom</option>
+              </select>
+              <input id="custom-symbol-rate" class="hidden" type="number" min="1" step="1" value="4800">
+            </div>
+          </div>
+          <button id="apply-config" class="btn primary">Apply Config</button>
+          <div id="config-message" class="message"></div>
+        </article>
+
+        <article class="panel status-panel">
+          <h2>Chip Status</h2>
+          <div id="status-circle" class="status-circle idle"></div>
+          <div class="metric">
+            <span>MARCSTATE</span>
+            <code id="marcstate">IDLE</code>
+          </div>
+          <div class="metric">
+            <span>SPI</span>
+            <span id="spi-badge" class="badge">CHECKING</span>
+          </div>
+          <div id="status-error" class="message error"></div>
+        </article>
+      </div>
+    </section>
+
+    <section id="tab-capture" class="tab-pane">
+      <div class="panel">
+        <div class="capture-actions">
+          <button id="start-capture" class="btn primary">Start</button>
+          <button id="stop-capture" class="btn" disabled>Stop</button>
+          <span id="packet-counter" class="counter">0 packets</span>
+        </div>
+        <div id="capture-error" class="message error"></div>
+        <div class="rssi-head"><span>RSSI</span><span id="rssi-value">-120 dBm</span></div>
+        <div class="rssi-track"><div id="rssi-fill" class="rssi-fill"></div></div>
+      </div>
+
+      <div class="panel table-panel">
+        <table>
+          <thead><tr><th>#</th><th>Time</th><th>RSSI</th><th>Len</th><th>Payload (hex)</th></tr></thead>
+          <tbody id="packet-table"></tbody>
+        </table>
+      </div>
+
+      <div class="panel save-panel">
+        <button id="show-save" class="btn">Save Capture</button>
+        <div id="save-form" class="inline hidden">
+          <input id="save-name" type="text" placeholder="label">
+          <button id="save-capture" class="btn primary">Save</button>
+        </div>
+        <div id="save-message" class="message"></div>
+      </div>
+    </section>
+
+    <section id="tab-library" class="tab-pane">
+      <div class="tab-header">
+        <h2>Library</h2>
+        <button id="refresh-library" class="btn small">Refresh</button>
+      </div>
+      <div id="library-list" class="library-list"></div>
+      <div id="library-empty" class="empty hidden">No captures saved yet. Go capture something.</div>
+    </section>
+
+    <section id="tab-replay" class="tab-pane">
+      <div id="replay-empty" class="empty">Select a capture from the Library tab.</div>
+      <div id="replay-panel" class="hidden">
+        <div class="panel">
+          <div class="capture-title">
+            <h2 id="replay-name"></h2>
+            <span id="replay-meta" class="badge"></span>
+          </div>
+          <div class="select-links">
+            <button id="select-all" class="link-btn">Select all</button>
+            <button id="select-none" class="link-btn">None</button>
+          </div>
+          <div id="replay-packets" class="replay-packets"></div>
+        </div>
+        <div class="panel replay-controls">
+          <label>Repeat <input id="repeat-count" type="number" min="1" max="99" value="1"></label>
+          <label>Delay between repeats <input id="delay-ms" type="number" min="0" value="200"> ms</label>
+          <div id="replay-capture-note" class="message"></div>
+          <button id="transmit" class="btn primary transmit">Transmit</button>
+          <div id="replay-message" class="message"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
