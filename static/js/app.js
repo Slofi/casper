@@ -1,9 +1,13 @@
 const state = {
   capturing: false,
+  monitoring: false,
+  autoArmed: false,
   packets: [],
   captures: [],
   loadedCapture: null,
   eventSource: null,
+  rssiSamples: [],
+  peakRssi: -120,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -32,6 +36,10 @@ function switchTab(name) {
   if (name === "library") loadLibrary();
 }
 
+function setSettingsOpen(open) {
+  $("settings-menu").classList.toggle("hidden", !open);
+}
+
 function rssiWidth(rssi) {
   const clamped = Math.max(-120, Math.min(0, Number(rssi) || -120));
   return ((clamped + 120) / 120) * 100;
@@ -42,10 +50,54 @@ function updateRssi(rssi) {
   $("rssi-fill").style.width = `${rssiWidth(rssi)}%`;
 }
 
+function drawSignal() {
+  const canvas = $("signal-canvas");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#0b0b10";
+  ctx.fillRect(0, 0, w, h);
+  ctx.strokeStyle = "rgba(255,255,255,0.08)";
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i += 1) {
+    const y = Math.round((i / 4) * h) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+  }
+  const samples = state.rssiSamples.slice(-w);
+  const barW = Math.max(1, Math.floor(w / Math.max(samples.length, 1)));
+  samples.forEach((sample, i) => {
+    const level = rssiWidth(sample.rssi) / 100;
+    const x = w - ((samples.length - i) * barW);
+    const barH = Math.max(1, level * h);
+    const hot = sample.rssi > -65;
+    const warm = sample.rssi > -85;
+    ctx.fillStyle = hot ? "#ff5050" : (warm ? "#e8b04f" : "rgba(232,176,79,0.45)");
+    ctx.fillRect(x, h - barH, barW, barH);
+  });
+}
+
+function addRssiSample(rssi) {
+  const value = Number(rssi);
+  if (!Number.isFinite(value)) return;
+  state.rssiSamples.push({ ts: Date.now(), rssi: value });
+  if (state.rssiSamples.length > 900) state.rssiSamples.splice(0, state.rssiSamples.length - 900);
+  state.peakRssi = Math.max(state.peakRssi, value);
+  $("signal-peak").textContent = `Peak ${Math.round(state.peakRssi)} dBm`;
+  drawSignal();
+}
+
 function setStatus(status) {
   state.capturing = Boolean(status.capturing);
-  const mode = status.chip_ok ? (status.capturing ? "rx" : "idle") : "error-state";
-  $("toolbar-state").textContent = status.capturing ? "RX" : (status.chip_ok ? "IDLE" : "ERROR");
+  state.monitoring = Boolean(status.monitoring);
+  state.autoArmed = Boolean(status.auto_armed);
+  const activeRadio = status.capturing || status.monitoring || status.auto_armed;
+  const mode = status.chip_ok ? (activeRadio ? "rx" : "idle") : "error-state";
+  $("toolbar-state").textContent = status.capturing ? "RX" : (status.auto_armed ? "AUTO" : (status.monitoring ? "MON" : (status.chip_ok ? "IDLE" : "ERROR")));
   $("marcstate").textContent = status.marcstate || "IDLE";
   $("spi-badge").textContent = status.chip_ok ? "SPI OK" : "SPI ERROR";
   $("status-error").textContent = status.error || "";
@@ -53,6 +105,10 @@ function setStatus(status) {
   document.querySelector(".status-dot").className = `status-dot ${mode}`;
   $("start-capture").disabled = state.capturing;
   $("stop-capture").disabled = !state.capturing;
+  $("start-monitor").disabled = state.capturing || state.monitoring || state.autoArmed;
+  $("stop-monitor").disabled = !state.monitoring;
+  $("start-auto").disabled = state.capturing || state.monitoring || state.autoArmed;
+  $("stop-auto").disabled = !state.autoArmed;
   $("packet-counter").textContent = `${status.packet_count || state.packets.length} packets`;
   updateRssi(status.rssi ?? -120);
   renderReplayDisabled();
@@ -99,11 +155,20 @@ function startSse() {
   state.eventSource = new EventSource("/api/capture/live");
   state.eventSource.onmessage = (event) => {
     const data = JSON.parse(event.data);
-    if (data.type === "rssi") updateRssi(data.value);
+    if (data.type === "rssi") {
+      updateRssi(data.value);
+      addRssiSample(data.value);
+    }
     if (data.type === "packet") {
       state.packets.push(data);
       addPacketRow(data);
       updateRssi(data.rssi);
+      addRssiSample(data.rssi);
+    }
+    if (data.type === "auto") {
+      if (data.state === "triggered") $("auto-status").textContent = `Triggered at ${Math.round(data.rssi)} dBm`;
+      if (data.state === "saved") $("auto-status").textContent = `Saved ${data.id} (${data.packets} packets)`;
+      if (data.state === "quiet") $("auto-status").textContent = "Signal ended, no packet decoded";
     }
     if (data.type === "error") {
       setMessage("capture-error", data.msg, true);
@@ -132,6 +197,68 @@ async function startCapture() {
     setMessage("capture-error", err.message, true);
     await refreshStatus();
   }
+}
+
+async function startMonitor() {
+  setMessage("capture-error", "");
+  state.rssiSamples = [];
+  state.peakRssi = -120;
+  drawSignal();
+  try {
+    await api("/api/monitor/start", { method: "POST" });
+    startSse();
+    await refreshStatus();
+  } catch (err) {
+    setMessage("capture-error", err.message, true);
+    await refreshStatus();
+  }
+}
+
+async function stopMonitor() {
+  try {
+    await api("/api/monitor/stop", { method: "POST" });
+  } catch (err) {
+    setMessage("capture-error", err.message, true);
+  }
+  if (!state.capturing) stopSse();
+  await refreshStatus();
+}
+
+async function startAuto() {
+  setMessage("capture-error", "");
+  state.rssiSamples = [];
+  state.peakRssi = -120;
+  $("packet-table").innerHTML = "";
+  state.packets = [];
+  $("auto-status").textContent = "Auto armed";
+  drawSignal();
+  try {
+    await api("/api/auto/start", {
+      method: "POST",
+      body: {
+        threshold: Number($("auto-threshold").value),
+        prebuffer_ms: Number($("auto-prebuffer").value),
+        quiet_ms: Number($("auto-quiet").value),
+      },
+    });
+    startSse();
+    await refreshStatus();
+  } catch (err) {
+    $("auto-status").textContent = "Auto idle";
+    setMessage("capture-error", err.message, true);
+    await refreshStatus();
+  }
+}
+
+async function stopAuto() {
+  try {
+    await api("/api/auto/stop", { method: "POST" });
+    $("auto-status").textContent = "Auto idle";
+  } catch (err) {
+    setMessage("capture-error", err.message, true);
+  }
+  stopSse();
+  await refreshStatus();
 }
 
 async function stopCapture() {
@@ -165,6 +292,41 @@ function formatDate(ts) {
   return `${date} ${time}`;
 }
 
+function formatDecode(data) {
+  const lines = [];
+  lines.push(`${data.name || "capture"} · ${Number(data.frequency).toFixed(2)} MHz · ${data.modulation} · ${data.symbol_rate} baud`);
+  lines.push(`${data.packet_count} packets · ${data.unique_payloads} unique payloads · lengths: ${data.lengths.join(", ") || "none"}`);
+  lines.push("");
+  if (data.repeats.length) {
+    lines.push("Repeated payloads:");
+    data.repeats.slice(0, 8).forEach((item) => {
+      lines.push(`  x${item.count}  ${truncateHex(item.hex)}  indices ${item.indices.slice(0, 8).join(",")}`);
+    });
+    lines.push("");
+  }
+  lines.push("Packets:");
+  data.packets.slice(0, 80).forEach((pkt) => {
+    lines.push(`#${pkt.index}  +${pkt.offset_ms}ms  ${Math.round(pkt.rssi)} dBm  len ${pkt.len}`);
+    lines.push(`HEX   ${pkt.hex}`);
+    lines.push(`BITS  ${pkt.bits}`);
+    lines.push(`ASCII ${pkt.ascii}`);
+    lines.push("");
+  });
+  if (data.packets.length > 80) lines.push(`... ${data.packets.length - 80} more packets not shown`);
+  return lines.join("\n");
+}
+
+async function decodeCapture(capture) {
+  try {
+    const data = await api(`/api/captures/${encodeURIComponent(capture.id)}/decode`);
+    $("decode-title").textContent = `Decode: ${capture.name}`;
+    $("decode-output").textContent = formatDecode(data);
+    $("decode-panel").classList.remove("hidden");
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
 async function loadLibrary() {
   const list = $("library-list");
   const empty = $("library-empty");
@@ -190,6 +352,7 @@ async function loadLibrary() {
       <textarea rows="2" placeholder="Add a note...">${cap.note || ""}</textarea>
       <div class="inline">
         <button class="btn primary load">Load for Replay</button>
+        <button class="btn decode">Decode</button>
         <button class="btn danger delete">Delete</button>
       </div>`;
     card.querySelector("textarea").addEventListener("blur", async (event) => {
@@ -201,6 +364,7 @@ async function loadLibrary() {
       }
     });
     card.querySelector(".load").addEventListener("click", () => loadReplay(cap));
+    card.querySelector(".decode").addEventListener("click", () => decodeCapture(cap));
     card.querySelector(".delete").addEventListener("click", async () => {
       if (!confirm(`Delete ${cap.name}?`)) return;
       await api(`/api/captures/${encodeURIComponent(cap.id)}`, { method: "DELETE" });
@@ -323,6 +487,10 @@ async function transmitReplay() {
 }
 
 document.querySelectorAll(".main-tab").forEach((btn) => btn.addEventListener("click", () => switchTab(btn.dataset.tab)));
+$("settings-toggle").addEventListener("click", () => setSettingsOpen($("settings-menu").classList.contains("hidden")));
+document.addEventListener("click", (event) => {
+  if (!$("settings-wrap").contains(event.target)) setSettingsOpen(false);
+});
 document.querySelectorAll(".preset").forEach((btn) => btn.addEventListener("click", () => { $("frequency").value = btn.dataset.frequency; }));
 $("symbol-rate").addEventListener("change", () => $("custom-symbol-rate").classList.toggle("hidden", $("symbol-rate").value !== "custom"));
 $("apply-config").addEventListener("click", async () => {
@@ -336,9 +504,14 @@ $("apply-config").addEventListener("click", async () => {
 });
 $("start-capture").addEventListener("click", startCapture);
 $("stop-capture").addEventListener("click", stopCapture);
+$("start-monitor").addEventListener("click", startMonitor);
+$("stop-monitor").addEventListener("click", stopMonitor);
+$("start-auto").addEventListener("click", startAuto);
+$("stop-auto").addEventListener("click", stopAuto);
 $("show-save").addEventListener("click", () => $("save-form").classList.toggle("hidden"));
 $("save-capture").addEventListener("click", saveCapture);
 $("refresh-library").addEventListener("click", loadLibrary);
+$("close-decode").addEventListener("click", () => $("decode-panel").classList.add("hidden"));
 $("select-all").addEventListener("click", () => document.querySelectorAll("#replay-packets input").forEach((el) => { el.checked = true; }));
 $("select-none").addEventListener("click", () => document.querySelectorAll("#replay-packets input").forEach((el) => { el.checked = false; }));
 $("transmit").addEventListener("click", transmitReplay);
@@ -347,5 +520,6 @@ $("update-app").addEventListener("click", updateApp);
 $("restart-app").addEventListener("click", restartApp);
 
 refreshStatus();
+drawSignal();
 loadVersionStatus(false);
 setInterval(refreshStatus, 3000);
