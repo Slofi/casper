@@ -119,6 +119,17 @@
         </div>
         <canvas id="signal-canvas" width="900" height="180"></canvas>
         <div class="signal-scale"><span>-120</span><span>-90</span><span>-60</span><span>-30</span><span>0 dBm</span></div>
+        <div class="preview-head">
+          <span>Saved Signal Previews</span>
+          <button id="refresh-previews" class="btn small" type="button">Refresh</button>
+        </div>
+        <div class="preview-table-wrap">
+          <table class="preview-table">
+            <thead><tr><th>Time</th><th>RSSI</th><th>Packets</th><th>Freq</th><th>Actions</th></tr></thead>
+            <tbody id="preview-table"></tbody>
+          </table>
+        </div>
+        <div id="preview-empty" class="message">No previews saved yet.</div>
       </div>
 
       <div class="panel table-panel">

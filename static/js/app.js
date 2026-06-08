@@ -9,6 +9,7 @@ const state = {
   rssiSamples: [],
   peakRssi: -120,
   activeFolder: "All",
+  pendingPreviews: [],
 };
 
 const $ = (id) => document.getElementById(id);
@@ -172,6 +173,7 @@ function startSse() {
       if (data.state === "triggered") $("auto-status").textContent = `Triggered at ${Math.round(data.rssi)} dBm`;
       if (data.state === "saved") {
         $("auto-status").textContent = `Preview saved ${data.id} (${data.packets} packets)`;
+        loadPreviews();
         loadLibrary();
       }
       if (data.state === "quiet") $("auto-status").textContent = "Signal ended, no packet decoded";
@@ -340,9 +342,55 @@ async function keepCapture(capture) {
   if (name === null) return;
   try {
     await api(`/api/captures/${encodeURIComponent(capture.id)}/keep`, { method: "POST", body: { name } });
+    await loadPreviews();
     await loadLibrary();
   } catch (err) {
     alert(err.message);
+  }
+}
+
+async function discardCapture(capture) {
+  if (!confirm(`${capture.preview ? "Discard preview" : "Delete capture"} ${capture.name}?`)) return;
+  await api(`/api/captures/${encodeURIComponent(capture.id)}`, { method: "DELETE" });
+  await loadPreviews();
+  await loadLibrary();
+}
+
+function reviewCapture(capture) {
+  decodeCapture(capture);
+  switchTab("library");
+}
+
+async function loadPreviews() {
+  const tbody = $("preview-table");
+  const empty = $("preview-empty");
+  if (!tbody) return;
+  try {
+    const captures = await api("/api/captures");
+    state.pendingPreviews = captures.filter((cap) => cap.preview);
+  } catch (err) {
+    empty.textContent = `Preview load failed: ${err.message}`;
+    return;
+  }
+  tbody.innerHTML = "";
+  empty.classList.toggle("hidden", state.pendingPreviews.length !== 0);
+  for (const cap of state.pendingPreviews) {
+    const maxRssi = cap.packets.length ? Math.max(...cap.packets.map((pkt) => Number(pkt.rssi) || -120)) : -120;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${formatDate(cap.ts)}</td>
+      <td>${Math.round(maxRssi)} dBm</td>
+      <td>${cap.packet_count}</td>
+      <td>${Number(cap.frequency).toFixed(2)}</td>
+      <td><div class="inline">
+        <button class="btn small review">Review</button>
+        <button class="btn small primary keep">Keep</button>
+        <button class="btn small danger discard">Discard</button>
+      </div></td>`;
+    tr.querySelector(".review").addEventListener("click", () => reviewCapture(cap));
+    tr.querySelector(".keep").addEventListener("click", () => keepCapture(cap));
+    tr.querySelector(".discard").addEventListener("click", () => discardCapture(cap));
+    tbody.append(tr);
   }
 }
 
@@ -416,9 +464,7 @@ async function loadLibrary() {
     if (keepBtn) keepBtn.addEventListener("click", () => keepCapture(cap));
     card.querySelector(".decode").addEventListener("click", () => decodeCapture(cap));
     card.querySelector(".delete").addEventListener("click", async () => {
-      if (!confirm(`${cap.preview ? "Discard preview" : "Delete capture"} ${cap.name}?`)) return;
-      await api(`/api/captures/${encodeURIComponent(cap.id)}`, { method: "DELETE" });
-      await loadLibrary();
+      await discardCapture(cap);
     });
     list.append(card);
   }
@@ -561,6 +607,7 @@ $("stop-auto").addEventListener("click", stopAuto);
 $("show-save").addEventListener("click", () => $("save-form").classList.toggle("hidden"));
 $("save-capture").addEventListener("click", saveCapture);
 $("refresh-library").addEventListener("click", loadLibrary);
+$("refresh-previews").addEventListener("click", loadPreviews);
 $("close-decode").addEventListener("click", () => $("decode-panel").classList.add("hidden"));
 $("select-all").addEventListener("click", () => document.querySelectorAll("#replay-packets input").forEach((el) => { el.checked = true; }));
 $("select-none").addEventListener("click", () => document.querySelectorAll("#replay-packets input").forEach((el) => { el.checked = false; }));
@@ -571,5 +618,6 @@ $("restart-app").addEventListener("click", restartApp);
 
 refreshStatus();
 drawSignal();
+loadPreviews();
 loadVersionStatus(false);
 setInterval(refreshStatus, 3000);

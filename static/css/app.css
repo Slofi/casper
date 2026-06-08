@@ -287,6 +287,28 @@ code, .hex { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospa
   margin-top: 4px;
   font-variant-numeric: tabular-nums;
 }
+.preview-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0 6px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.preview-table-wrap {
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+.preview-table th,
+.preview-table td { padding: 6px 8px; }
+.preview-table .inline { gap: 5px; }
 
 .table-panel { margin-top: 8px; overflow: auto; max-height: calc(100vh - 260px); }
 table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
