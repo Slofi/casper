@@ -1,7 +1,7 @@
 type:: project
 status:: planning
 tags:: #casper #cc1101 #rf #sdr #subghz
-updated:: 2026-05-29
+updated:: 2026-06-08
 
 # Casper
 
@@ -12,9 +12,9 @@ updated:: 2026-05-29
 
 | **Label**   | value |
 |-------------|-------|
-| Status      | Planning — waiting for replacement CC1101 module |
+| Status      | Built on Testbox; CD deploy paused/offline |
 | Hardware    | CC1101 on /dev/spidev0.0 (Rock 5B SPI0 M2) |
-| Port        | :5300 (proposed) |
+| Port        | :5300 |
 | Platform    | Cyberdeck (Rock 5B, Armbian GNOME) |
 | Style       | Dark/amber — consistent with Banshee + Sonde App |
 
@@ -51,11 +51,17 @@ systemctl --user stop casper
 - [x] Replacement CC1101 module arrived and verified working (session 328)
 - [x] SPI permissions fixed — `/dev/spidev0.0` accessible by `plugdev` group
 - [x] Launcher tile added (fa-ghost, port 5300, before Terminal tile)
-- [ ] Build app — see Codex Implementation Brief below
+- [x] App built by Codex (session 328)
+- [x] rtl_433 already installed (v23.11), confirmed working with RTL-SDR
+- [x] Add DECODE tab — rtl_433 + CC1101 simultaneous decode+capture
+- [x] Add Capture preview table with decoded summary + saved notes
+- [ ] Re-sync/restart on Cyberdeck when CD is online again
 - [ ] Wire CC1101 GPS toggle switch on faceplate
 
 ## Changelog
 
+**2026-06-08** — Session checkpoint saved on Testbox: Capture tab has Saved Signal Previews table with decoded summary and per-preview notes; Auto Arm saves decoded and RSSI-only previews; Library has folders/notes; DECODE tab implementation is present in working tree. CD went offline during deploy, so re-sync/restart CD when back online. Current save commit pending/pushed from Testbox after this checkpoint.
+**2026-06-08** — rtl_433 confirmed installed (v23.11), DECODE tab brief written; custom confirm modal + preview UX polish (session 328)
 **2026-06-08** — CC1101 replacement wired + verified, SPI permissions fixed, launcher tile added (session 328)
 **2026-05-29** — Project opened, rough spec written (session 314)
 
@@ -468,3 +474,301 @@ After creating: `systemctl --user daemon-reload` (do not auto-enable or auto-sta
 9. **SSE client cleanup.** SSE clients disconnect silently. Catch all exceptions when pushing to a queue and remove dead clients. Use `maxsize=50` on each queue to prevent memory growth.
 
 10. **Captures directory.** `~/captures/casper/` — `os.makedirs(..., exist_ok=True)` at startup. File IDs are filenames without `.json`. Sanitise the `name` field before using it in a filename: `re.sub(r'[^\w\-]', '_', name)`.
+
+---
+
+## DECODE Tab — rtl_433 + CC1101 Integration Brief
+
+**Goal:** Add a 5th tab **DECODE** (between CAPTURE and LIBRARY). It runs `rtl_433` via subprocess to identify signals using the RTL-SDR, while optionally running CC1101 capture simultaneously. rtl_433 tells you WHAT the signal is; CC1101 captures the raw bytes for replay. One button arms both at once.
+
+This is an additive change — do not break any existing functionality.
+
+---
+
+### Hardware facts (do not change)
+- `rtl_433` binary: `/usr/bin/rtl_433`, version 23.11, confirmed working
+- RTL-SDR is **separate hardware** from the CC1101 (SPI). They can run **simultaneously** — this is the whole point.
+- rtl_433 uses RTL-SDR; CC1101 uses `/dev/spidev0.0`. No conflict between them.
+- User: `slofi`. No sudo needed for either.
+
+---
+
+### 1. Tab structure change
+
+Add **DECODE** as the 4th tab. New order: `CONFIG · CAPTURE · DECODE · LIBRARY · REPLAY`
+
+In `index.html`, add:
+```html
+<button class="main-tab" data-tab="decode">DECODE</button>
+```
+(between CAPTURE and LIBRARY)
+
+---
+
+### 2. Backend additions — app.py
+
+**New state fields** (add to `_state` dict):
+```python
+'rtl_active':  False,
+'rtl_signals': [],      # decoded signals from current session
+```
+
+**New module-level vars:**
+```python
+_rtl_proc    = None
+_rtl_thread  = None
+_rtl_running = False
+```
+
+**rtl_433 thread:**
+```python
+def _run_rtl433(freq_mhz):
+    global _rtl_running, _rtl_proc
+    cmd = ['rtl_433', '-f', f'{freq_mhz}M', '-F', 'json', '-F', 'log', '-M', 'time:utc']
+    try:
+        _rtl_proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, bufsize=1
+        )
+        for line in _rtl_proc.stdout:
+            if not _rtl_running:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                with _lock:
+                    _state['rtl_signals'].append(data)
+                _sse_push({'type': 'rtl_signal', 'data': data})
+            except json.JSONDecodeError:
+                pass
+    except Exception as exc:
+        _sse_push({'type': 'error', 'msg': f'rtl_433: {exc}'})
+    finally:
+        if _rtl_proc:
+            try:
+                _rtl_proc.terminate()
+                _rtl_proc.wait(timeout=3)
+            except Exception:
+                pass
+        _rtl_running = False
+        with _lock:
+            _state['rtl_active'] = False
+        _sse_push({'type': 'rtl_stopped'})
+```
+
+**New routes:**
+
+`POST /api/rtl/start` — body: `{"frequency": 433.92}` (optional, defaults to current config freq)
+- If already running: `{"error": "already running"}`
+- Clear `_state['rtl_signals']`, set `_state['rtl_active'] = True`, start daemon thread
+- Returns `{"ok": true}`
+
+`POST /api/rtl/stop`
+- Set `_rtl_running = False`, terminate `_rtl_proc`, join thread (timeout 3s)
+- Set `_state['rtl_active'] = False`
+- Returns `{"ok": true}`
+
+`POST /api/decode/start` — **the main "Decode + Capture" combined route**
+- Starts rtl_433 (`/api/rtl/start` logic)
+- AND starts CC1101 capture (`/api/capture/start` logic) simultaneously
+- Both run in parallel — this is valid since they use separate hardware
+- Returns `{"ok": true, "rtl": true, "cc1101": true}` or partial success with error info if one fails
+
+`POST /api/decode/stop` — stops both rtl_433 and CC1101 capture
+- Returns `{"ok": true}`
+
+`POST /api/rtl/save` — save current rtl session signals to library
+- body: `{"name": "label"}`
+- Saves a capture file with `signal_type: "rtl_decoded"`, packets from rtl signals (empty), plus `rtl_signals` array in a new top-level field
+- Returns `{"ok": true, "id": "..."}`
+
+`GET /api/status` — **extend existing response** to include:
+```json
+{"rtl_active": false, "rtl_count": 0, ...existing fields...}
+```
+
+---
+
+### 3. Capture file format — extend for decoded signals
+
+When saving an rtl_433 session, use this format (extends existing format):
+```json
+{
+  "name": "garage_remote",
+  "ts": 1234567890,
+  "frequency": 433.92,
+  "modulation": "OOK",
+  "symbol_rate": 4800,
+  "note": "",
+  "signal_type": "rtl_decoded",
+  "rtl_signals": [
+    {
+      "time": "2026-06-08 12:00:00",
+      "model": "Nexus-TH",
+      "id": 42,
+      "channel": 1,
+      "temperature_C": 21.4,
+      "humidity": 65,
+      "freq": 433.92,
+      "rssi": -72.4
+    }
+  ],
+  "packets": []
+}
+```
+
+When **combined decode+capture** saves, it has BOTH `rtl_signals` AND `packets` populated — this is the richest capture type.
+
+---
+
+### 4. DECODE tab — index.html
+
+Add a new `<section id="tab-decode" class="tab-pane">` with this structure:
+
+**Top controls panel:**
+```
+[▶ Decode + Capture]   [◉ Decode Only]   [■ Stop]   Freq: [433.92] MHz
+```
+- "Decode + Capture" = runs rtl_433 + CC1101 simultaneously (the main button, `primary` style)
+- "Decode Only" = runs rtl_433 alone (no CC1101)
+- "Stop" = stops everything
+- Freq input synced with CONFIG tab value
+
+**Status row:**
+```
+RTL-SDR: [● ACTIVE] / [○ IDLE]    CC1101: [● CAPTURING] / [○ IDLE]    N signals decoded
+```
+Dots are colored: green=active, dim=idle.
+
+**Signal feed** — scrollable list of decoded signal cards. New signals prepend to top.
+
+Each signal card:
+```
+┌──────────────────────────────────────────────────────────────┐
+│ [model name in accent color, bold]        [time, dim]  [RSSI]│
+│ field1: value  field2: value  field3: value  ...             │
+│ Freq: 433.92 MHz · OOK                                       │
+│         [Load for Replay ↗]  [Save]                          │
+└──────────────────────────────────────────────────────────────┘
+```
+- Model in `--accent` color, bold
+- All decoded fields shown as `key: value` pairs (skip internal rtl_433 fields starting with `_`)
+- `freq` field shown if present
+- **[Load for Replay]** — sets CC1101 config to this signal's frequency, switches to REPLAY tab (or CONFIG tab if no CC1101 capture yet), and pre-fills a replay session with this decode metadata
+- **[Save]** — saves just this one signal to library
+
+**If model is "unknown" or not present:** show hex data if available, or "Unrecognised signal" in muted text.
+
+**Empty state:** "No signals decoded yet. Press Decode to start listening."
+
+**[Save Session]** button at bottom of panel — saves all signals in current session to one library entry.
+
+---
+
+### 5. LIBRARY tab — show decoded signal info
+
+In `loadLibrary()`, detect `signal_type === 'rtl_decoded'` and show a different card format:
+- Badge: `RTL DECODED` (blue pill) instead of the usual packet count
+- Show model names from `rtl_signals` array (e.g. "Nexus-TH × 3")
+- Still has [Load for Replay], [Decode], [Delete] buttons
+- No [Keep] button (these are already saved, not previews)
+
+In the Decode panel (`decodeCapture`), if `rtl_signals` present: render each rtl signal's fields as a formatted table above the usual hex decode output.
+
+---
+
+### 6. REPLAY tab — show decode context
+
+When a capture loaded for replay has `rtl_signals` populated:
+- Show a "Decoded as:" info block above the packet list
+- Format: `Nexus-TH — 21.4°C, 65% humidity` (summarise the first/most common signal)
+- This tells the user WHAT they're about to replay
+
+---
+
+### 7. app.js additions
+
+**State additions:**
+```js
+rtlActive:   false,
+rtlSignals:  [],
+```
+
+**SSE handler additions** (in the existing `onmessage` handler):
+```js
+case 'rtl_signal':  handleRtlSignal(data.data); break;
+case 'rtl_stopped': setRtlActive(false); break;
+```
+
+**`handleRtlSignal(sig)`:**
+- Push to `state.rtlSignals`
+- Prepend a card to `#decode-signal-feed`
+- Update signal counter
+- If `sig.model` matches something in `state.captures` → highlight (nice-to-have, skip if complex)
+
+**`setRtlActive(bool)`:** updates RTL status dot + disables/enables buttons
+
+**Tab switch:** when switching TO decode tab, update status display. When switching FROM decode tab while active, do NOT stop rtl_433 (let it keep running).
+
+---
+
+### 8. CSS additions
+
+Signal card:
+```css
+.rtl-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  margin-bottom: 8px;
+}
+.rtl-card-model { color: var(--accent); font-weight: 600; font-size: 0.9rem; }
+.rtl-card-fields { font-size: 0.82rem; color: var(--text); margin: 6px 0; display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.rtl-card-field-key { color: var(--text-muted); }
+.rtl-card-meta { font-size: 0.75rem; color: var(--text-muted); }
+.rtl-card-actions { display: flex; gap: 8px; margin-top: 8px; }
+```
+
+Status dots:
+```css
+.hw-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); display: inline-block; }
+.hw-dot.active { background: var(--green); box-shadow: 0 0 5px rgba(74,222,128,0.5); }
+```
+
+Badge for library:
+```css
+.badge.rtl { background: rgba(88,166,255,0.12); color: #58a6ff; border-color: rgba(88,166,255,0.3); }
+```
+
+---
+
+### 9. Critical notes for Codex
+
+1. **rtl_433 and CC1101 are independent hardware** — they MUST be allowed to run simultaneously. Do not add mutual exclusion between them.
+
+2. **rtl_433 process cleanup** — always call `proc.terminate()` + `proc.wait(timeout=3)` when stopping. If it doesn't exit, call `proc.kill()`. Zombie rtl_433 processes will block the RTL-SDR.
+
+3. **rtl_433 JSON output** — each decoded signal is one JSON object per line on stdout. The `-F json` flag enables this. The `-F log` flag sends rtl_433's own messages to stderr (which we discard with `stderr=subprocess.DEVNULL`). Do not try to parse stderr.
+
+4. **rtl_433 `-M time:utc`** — adds a `time` field to every decoded signal. Always include this flag.
+
+5. **Frequency sync** — the DECODE tab frequency input and the CONFIG tab frequency input should stay in sync. When user changes one, update the other. Use a shared JS variable `state.config.frequency`.
+
+6. **[Load for Replay]** button logic:
+   - Set `state.config.frequency` to signal's `freq` field (if present) or current decode freq
+   - Set CC1101 modulation to OOK (most 433 MHz devices)
+   - Call `POST /api/config` with the values
+   - If there are CC1101 packets in the session: load them into the REPLAY tab and switch there
+   - If no CC1101 packets yet: switch to CONFIG tab, flash the Apply button to prompt the user
+
+7. **SSE already running** — the existing SSE `EventSource('/api/capture/live')` is always open (it reconnects). The new `rtl_signal` and `rtl_stopped` event types just need to be handled in the existing `onmessage` handler. Do not create a second SSE connection.
+
+8. **rtl_433 may not decode everything** — some signals are unrecognised. rtl_433 still outputs them as `{"model": "unknown", ...}` with pulse analysis. Show these too, marked as "Unrecognised" in muted text.
+
+9. **`_rtl_proc` cleanup on Flask shutdown** — add a signal handler or `atexit` handler that terminates `_rtl_proc` if it's running when the service stops.
+
+10. **Do not rename or restructure existing tabs/routes.** This is purely additive. All existing functionality stays intact.

@@ -309,6 +309,70 @@ code, .hex { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospa
 .preview-table th,
 .preview-table td { padding: 6px 8px; }
 .preview-table .inline { gap: 5px; }
+.preview-note { min-width: 160px; width: 100%; }
+.preview-head-actions { display: flex; gap: 6px; }
+.preview-table .row-num { color: var(--text-muted); font-size: 0.75rem; text-align: right; width: 28px; }
+
+/* ── DECODE tab ──────────────────────────────────────────────────── */
+.decode-controls {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.decode-freq-label {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 0.82rem; color: var(--text-muted); margin-left: 4px;
+}
+.decode-freq-label input { width: 92px; }
+.decode-status-row {
+  display: flex; align-items: center; gap: 16px; margin-top: 10px;
+  flex-wrap: wrap;
+}
+.hw-status { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--text-muted); }
+.hw-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); display: inline-block; flex-shrink: 0; transition: background 0.3s, box-shadow 0.3s; }
+.hw-dot.active { background: var(--green); box-shadow: 0 0 5px rgba(74,222,128,0.5); }
+.hw-state { color: var(--text); font-size: 0.78rem; }
+.decode-feed { display: flex; flex-direction: column; gap: 8px; padding: 4px 0; overflow-y: auto; }
+.rtl-card {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius); padding: 10px 14px;
+}
+.rtl-card-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.rtl-card-model { color: var(--accent); font-weight: 600; font-size: 0.9rem; }
+.rtl-card-time { color: var(--text-muted); font-size: 0.75rem; }
+.rtl-card-rssi { color: var(--text-muted); font-size: 0.75rem; margin-left: auto; }
+.rtl-card-fields { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 8px; }
+.rtl-card-field { font-size: 0.82rem; }
+.rtl-card-field-key { color: var(--text-muted); }
+.rtl-card-field-val { color: var(--text); }
+.rtl-card-actions { display: flex; gap: 8px; }
+.badge.rtl { background: rgba(88,166,255,0.10); color: #58a6ff; border-color: rgba(88,166,255,0.25); }
+.rtl-summary { font-size: 0.82rem; color: var(--text-muted); margin-bottom: 8px; }
+.decode-context {
+  background: var(--bg3); border: 1px solid var(--accent-mid);
+  border-radius: var(--radius); padding: 8px 12px; margin-bottom: 10px;
+  font-size: 0.82rem; color: var(--text);
+}
+.decode-context-label { color: var(--accent); font-weight: 600; margin-right: 6px; }
+
+/* ── Custom confirm modal ─────────────────────────────────────────── */
+.confirm-modal {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.65);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 9999;
+  backdrop-filter: blur(2px);
+}
+.confirm-modal.hidden { display: none; }
+.confirm-box {
+  background: var(--bg2);
+  border: 1px solid var(--accent-mid);
+  border-radius: 10px;
+  padding: 22px 24px 18px;
+  min-width: 280px; max-width: 360px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+}
+.confirm-box p { margin: 0 0 18px; color: var(--text); font-size: 0.88rem; line-height: 1.5; }
+.confirm-btns { display: flex; gap: 8px; justify-content: flex-end; }
 
 .table-panel { margin-top: 8px; overflow: auto; max-height: calc(100vh - 260px); }
 table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }

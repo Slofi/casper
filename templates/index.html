@@ -12,6 +12,7 @@
     <nav class="main-tabs" aria-label="Casper tabs">
       <button class="main-tab active" data-tab="config">CONFIG</button>
       <button class="main-tab" data-tab="capture">CAPTURE</button>
+      <button class="main-tab" data-tab="decode">DECODE</button>
       <button class="main-tab" data-tab="library">LIBRARY</button>
       <button class="main-tab" data-tab="replay">REPLAY</button>
     </nav>
@@ -121,11 +122,14 @@
         <div class="signal-scale"><span>-120</span><span>-90</span><span>-60</span><span>-30</span><span>0 dBm</span></div>
         <div class="preview-head">
           <span>Saved Signal Previews</span>
-          <button id="refresh-previews" class="btn small" type="button">Refresh</button>
+          <div class="preview-head-actions">
+            <button id="refresh-previews" class="btn small" type="button">Refresh</button>
+            <button id="clear-previews" class="btn small danger" type="button">Clear All</button>
+          </div>
         </div>
         <div class="preview-table-wrap">
           <table class="preview-table">
-            <thead><tr><th>Time</th><th>RSSI</th><th>Packets</th><th>Freq</th><th>Actions</th></tr></thead>
+            <thead><tr><th>#</th><th>Time</th><th>RSSI</th><th>Packets</th><th>Freq</th><th>Decoded</th><th>Note</th><th>Actions</th></tr></thead>
             <tbody id="preview-table"></tbody>
           </table>
         </div>
@@ -147,6 +151,28 @@
         </div>
         <div id="save-message" class="message"></div>
       </div>
+    </section>
+
+    <section id="tab-decode" class="tab-pane">
+      <div class="panel">
+        <div class="decode-controls">
+          <button id="decode-start-both" class="btn primary" type="button">▶ Decode + Capture</button>
+          <button id="decode-start-rtl" class="btn" type="button">◉ Decode Only</button>
+          <button id="decode-stop" class="btn" disabled type="button">■ Stop</button>
+          <label class="decode-freq-label">Freq
+            <input id="decode-freq" type="number" min="300" max="928" step="0.01" value="433.92"> MHz
+          </label>
+        </div>
+        <div class="decode-status-row">
+          <span class="hw-status"><span class="hw-dot" id="rtl-dot"></span> RTL-SDR <span id="rtl-state-label" class="hw-state">IDLE</span></span>
+          <span class="hw-status"><span class="hw-dot" id="cc1101-dot"></span> CC1101 <span id="cc1101-state-label" class="hw-state">IDLE</span></span>
+          <span id="rtl-signal-count" class="counter">0 signals decoded</span>
+          <button id="decode-save-session" class="btn small" type="button" disabled>Save Session</button>
+        </div>
+        <div id="decode-error" class="message error"></div>
+      </div>
+      <div id="decode-feed" class="decode-feed"></div>
+      <div id="decode-empty" class="empty">No signals decoded yet. Press Decode to start listening.</div>
     </section>
 
     <section id="tab-library" class="tab-pane">
@@ -190,6 +216,16 @@
       </div>
     </section>
   </main>
+
+  <div id="confirm-modal" class="confirm-modal hidden" role="dialog" aria-modal="true">
+    <div class="confirm-box">
+      <p id="confirm-msg"></p>
+      <div class="confirm-btns">
+        <button id="confirm-cancel" class="btn" type="button">Cancel</button>
+        <button id="confirm-ok" class="btn danger" type="button">Confirm</button>
+      </div>
+    </div>
+  </div>
 
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>

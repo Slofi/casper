@@ -1,7 +1,34 @@
+function customConfirm(msg, okLabel = 'Confirm') {
+  return new Promise((resolve) => {
+    const modal  = document.getElementById('confirm-modal');
+    const msgEl  = document.getElementById('confirm-msg');
+    const okBtn  = document.getElementById('confirm-ok');
+    const cancel = document.getElementById('confirm-cancel');
+    msgEl.textContent = msg;
+    okBtn.textContent = okLabel;
+    modal.classList.remove('hidden');
+    function done(result) {
+      modal.classList.add('hidden');
+      okBtn.removeEventListener('click', onOk);
+      cancel.removeEventListener('click', onCancel);
+      modal.removeEventListener('click', onBackdrop);
+      resolve(result);
+    }
+    const onOk       = () => done(true);
+    const onCancel   = () => done(false);
+    const onBackdrop = (e) => { if (e.target === modal) done(false); };
+    okBtn.addEventListener('click', onOk);
+    cancel.addEventListener('click', onCancel);
+    modal.addEventListener('click', onBackdrop);
+  });
+}
+
 const state = {
   capturing: false,
   monitoring: false,
   autoArmed: false,
+  rtlActive: false,
+  rtlSignals: [],
   packets: [],
   captures: [],
   loadedCapture: null,
@@ -36,6 +63,7 @@ function switchTab(name) {
   document.querySelectorAll(".main-tab").forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === name));
   document.querySelectorAll(".tab-pane").forEach((pane) => pane.classList.toggle("active", pane.id === `tab-${name}`));
   if (name === "library") loadLibrary();
+  if (name === "decode") { $("decode-freq").value = $("frequency").value; updateDecodeStatus(); }
 }
 
 function setSettingsOpen(open) {
@@ -97,6 +125,10 @@ function setStatus(status) {
   state.capturing = Boolean(status.capturing);
   state.monitoring = Boolean(status.monitoring);
   state.autoArmed = Boolean(status.auto_armed);
+  if (status.rtl_active !== undefined) {
+    state.rtlActive = Boolean(status.rtl_active);
+    updateDecodeStatus();
+  }
   const activeRadio = status.capturing || status.monitoring || status.auto_armed;
   const mode = status.chip_ok ? (activeRadio ? "rx" : "idle") : "error-state";
   $("toolbar-state").textContent = status.capturing ? "RX" : (status.auto_armed ? "AUTO" : (status.monitoring ? "MON" : (status.chip_ok ? "IDLE" : "ERROR")));
@@ -145,7 +177,8 @@ function addPacketRow(packet, prepend = true) {
   const tbody = $("packet-table");
   const tr = document.createElement("tr");
   const idx = state.packets.length;
-  tr.innerHTML = `<td>${idx}</td><td>${packetTime(packet.ts)}</td><td>${Math.round(packet.rssi)}</td><td>${packet.len}</td><td title="${packet.hex}">${truncateHex(packet.hex)}</td>`;
+  const rawTag = packet.raw ? ' <span class="badge" style="font-size:0.65rem;padding:1px 4px;">RAW</span>' : '';
+  tr.innerHTML = `<td>${idx}</td><td>${packetTime(packet.ts)}</td><td>${Math.round(packet.rssi)}</td><td>${packet.len}${rawTag}</td><td title="${packet.hex}">${truncateHex(packet.hex)}</td>`;
   if (prepend) tbody.prepend(tr);
   else tbody.append(tr);
   while (tbody.children.length > 500) tbody.lastElementChild.remove();
@@ -180,7 +213,17 @@ function startSse() {
     }
     if (data.type === "error") {
       setMessage("capture-error", data.msg, true);
+      setMessage("decode-error", data.msg, true);
       refreshStatus();
+    }
+    if (data.type === "rtl_signal") {
+      state.rtlSignals.push(data.data);
+      prependRtlCard(data.data);
+      updateDecodeStatus();
+    }
+    if (data.type === "rtl_stopped") {
+      state.rtlActive = false;
+      updateDecodeStatus();
     }
   };
   state.eventSource.onerror = () => setMessage("capture-error", "Live stream disconnected", true);
@@ -302,6 +345,27 @@ function formatDate(ts) {
   return `${date} ${time}`;
 }
 
+function autoDecodePreview(cap) {
+  if (cap.signal_type === 'rssi_only' || !cap.packets || cap.packets.length === 0) return '—';
+  // find most-repeated payload
+  const freq = {};
+  for (const pkt of cap.packets) freq[pkt.hex] = (freq[pkt.hex] || 0) + 1;
+  const [topHex] = Object.entries(freq).sort((a, b) => b[1] - a[1])[0];
+  if (!topHex) return '—';
+  // try ASCII
+  let ascii = '';
+  for (let i = 0; i < topHex.length; i += 2)  {
+    const b = parseInt(topHex.slice(i, i + 2), 16);
+    ascii += (b >= 32 && b <= 126) ? String.fromCharCode(b) : '.';
+  }
+  const readable = ascii.replace(/\./g, '').length >= ascii.length * 0.5;
+  const label = readable
+    ? `"${ascii.length > 18 ? ascii.slice(0, 17) + '…' : ascii}"`
+    : `<code>${topHex.length > 20 ? topHex.slice(0, 18) + '…' : topHex}</code>`;
+  const rpt = freq[topHex];
+  return rpt > 1 ? `${label} ×${rpt}` : label;
+}
+
 function formatDecode(data) {
   const lines = [];
   lines.push(`${data.name || "capture"} · ${Number(data.frequency).toFixed(2)} MHz · ${data.modulation} · ${data.symbol_rate} baud`);
@@ -351,7 +415,7 @@ async function decodeCapture(capture) {
 
 async function keepCapture(capture) {
   if (capture.signal_type === "rssi_only") {
-    const ok = confirm("This preview has RSSI activity but no decoded payload, so it cannot be replayed. Keep it in the Library as a signal note?");
+    const ok = await customConfirm("This preview has RSSI activity but no decoded payload, so it cannot be replayed. Keep it in the Library as a signal note?", "Keep");
     if (!ok) return;
   }
   const name = prompt("Save preview as:", capture.name.replace(/^auto_preview/, "capture"));
@@ -366,7 +430,7 @@ async function keepCapture(capture) {
 }
 
 async function discardCapture(capture) {
-  if (!confirm(`${capture.preview ? "Discard preview" : "Delete capture"} ${capture.name}?`)) return;
+  if (!await customConfirm(`${capture.preview ? "Discard preview" : "Delete capture"} "${capture.name}"?`, capture.preview ? "Discard" : "Delete")) return;
   await api(`/api/captures/${encodeURIComponent(capture.id)}`, { method: "DELETE" });
   await loadPreviews();
   await loadLibrary();
@@ -375,6 +439,150 @@ async function discardCapture(capture) {
 function reviewCapture(capture) {
   decodeCapture(capture);
   switchTab("library");
+}
+
+// ── DECODE TAB ────────────────────────────────────────────────────
+
+const RTL_SKIP_KEYS = new Set(["time", "model", "freq", "freq1", "freq2", "rssi", "snr", "noise", "mod", "ook_symbols", "ook_bitrate"]);
+
+function formatRtlFields(sig) {
+  const entries = [];
+  for (const [k, v] of Object.entries(sig)) {
+    if (k.startsWith("_") || RTL_SKIP_KEYS.has(k)) continue;
+    entries.push(`<span class="rtl-card-field"><span class="rtl-card-field-key">${k}:</span> <span class="rtl-card-field-val">${v}</span></span>`);
+  }
+  return entries.join("");
+}
+
+function prependRtlCard(sig) {
+  const feed = $("decode-feed");
+  const empty = $("decode-empty");
+  if (empty) empty.classList.add("hidden");
+  const model = sig.model || "Unrecognised";
+  const ts = sig.time || new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const rssi = sig.rssi != null ? `${Math.round(sig.rssi)} dBm` : "";
+  const freq = sig.freq != null ? `${Number(sig.freq / 1e6).toFixed(2)} MHz` : "";
+  const metaParts = [freq, sig.mod || ""].filter(Boolean).join(" · ");
+  const card = document.createElement("div");
+  card.className = "rtl-card";
+  card.innerHTML = `
+    <div class="rtl-card-head">
+      <span class="rtl-card-model">${model}</span>
+      <span class="rtl-card-time">${ts}</span>
+      ${rssi ? `<span class="rtl-card-rssi">${rssi}</span>` : ""}
+    </div>
+    <div class="rtl-card-fields">${formatRtlFields(sig)}</div>
+    ${metaParts ? `<div class="rtl-card-meta">${metaParts}</div>` : ""}
+    <div class="rtl-card-actions">
+      <button class="btn small primary prep-replay">Load for Replay</button>
+      <button class="btn small save-one">Save</button>
+    </div>`;
+  card.querySelector(".prep-replay").addEventListener("click", () => prepRtlForReplay(sig));
+  card.querySelector(".save-one").addEventListener("click", async () => {
+    try {
+      const id = await api("/api/rtl/save", { method: "POST", body: { name: model.replace(/[^\w]/g, "_") } });
+      setMessage("decode-error", `Saved: ${id.id}`, false);
+      setTimeout(() => setMessage("decode-error", ""), 3000);
+    } catch (err) { setMessage("decode-error", err.message, true); }
+  });
+  feed.prepend(card);
+}
+
+function prepRtlForReplay(sig) {
+  const freq = sig.freq != null ? (sig.freq / 1e6) : Number($("decode-freq").value);
+  $("frequency").value = freq.toFixed(2);
+  $("decode-freq").value = freq.toFixed(2);
+  $("modulation").value = "OOK";
+  api("/api/config", { method: "POST", body: { frequency: freq, modulation: "OOK", symbol_rate: 4800 } }).catch(() => {});
+  if (state.packets.length > 0 && state.loadedCapture === null) {
+    loadReplay({ name: sig.model || "rtl_session", frequency: freq, modulation: "OOK", packet_count: state.packets.length, packets: state.packets, rtl_signals: [sig] });
+  } else {
+    switchTab("config");
+    $("apply-config").style.boxShadow = "0 0 0 2px var(--accent)";
+    setTimeout(() => { $("apply-config").style.boxShadow = ""; }, 2000);
+  }
+}
+
+function updateDecodeStatus() {
+  const rtlDot = $("rtl-dot");
+  const cc1101Dot = $("cc1101-dot");
+  const rtlLabel = $("rtl-state-label");
+  const cc1101Label = $("cc1101-state-label");
+  const stopBtn = $("decode-stop");
+  const saveBtn = $("decode-save-session");
+  const startBothBtn = $("decode-start-both");
+  const startRtlBtn = $("decode-start-rtl");
+  if (!rtlDot) return;
+  const rtlOn = state.rtlActive;
+  const ccOn = state.capturing;
+  rtlDot.classList.toggle("active", rtlOn);
+  if (rtlLabel) rtlLabel.textContent = rtlOn ? "ACTIVE" : "IDLE";
+  cc1101Dot.classList.toggle("active", ccOn);
+  if (cc1101Label) cc1101Label.textContent = ccOn ? "CAPTURING" : "IDLE";
+  const anyActive = rtlOn || ccOn;
+  if (stopBtn) stopBtn.disabled = !anyActive;
+  if (startBothBtn) startBothBtn.disabled = anyActive;
+  if (startRtlBtn) startRtlBtn.disabled = rtlOn;
+  if (saveBtn) saveBtn.disabled = state.rtlSignals.length === 0;
+  const count = $("rtl-signal-count");
+  if (count) count.textContent = `${state.rtlSignals.length} signal${state.rtlSignals.length === 1 ? "" : "s"} decoded`;
+}
+
+async function startDecodeAndCapture() {
+  setMessage("decode-error", "");
+  state.rtlSignals = [];
+  state.packets = [];
+  $("decode-feed").innerHTML = "";
+  $("packet-table").innerHTML = "";
+  if ($("decode-empty")) $("decode-empty").classList.remove("hidden");
+  const freq = Number($("decode-freq").value);
+  $("frequency").value = freq.toFixed(2);
+  try {
+    await api("/api/decode/start", { method: "POST", body: { frequency: freq } });
+    startSse();
+    await refreshStatus();
+    updateDecodeStatus();
+  } catch (err) {
+    setMessage("decode-error", err.message, true);
+    await refreshStatus();
+  }
+}
+
+async function startDecodeOnly() {
+  setMessage("decode-error", "");
+  state.rtlSignals = [];
+  $("decode-feed").innerHTML = "";
+  if ($("decode-empty")) $("decode-empty").classList.remove("hidden");
+  const freq = Number($("decode-freq").value);
+  $("frequency").value = freq.toFixed(2);
+  try {
+    await api("/api/rtl/start", { method: "POST", body: { frequency: freq } });
+    startSse();
+    await refreshStatus();
+    updateDecodeStatus();
+  } catch (err) {
+    setMessage("decode-error", err.message, true);
+  }
+}
+
+async function stopDecode() {
+  try {
+    await api("/api/decode/stop", { method: "POST" });
+  } catch (err) {
+    setMessage("decode-error", err.message, true);
+  }
+  await refreshStatus();
+  updateDecodeStatus();
+}
+
+async function saveDecodeSession() {
+  const name = `rtl_${Number($("decode-freq").value).toFixed(2).replace(".", "_")}`;
+  try {
+    const res = await api("/api/rtl/save", { method: "POST", body: { name } });
+    setMessage("decode-error", `Session saved: ${res.id}`, false);
+    setTimeout(() => setMessage("decode-error", ""), 3000);
+    await loadLibrary();
+  } catch (err) { setMessage("decode-error", err.message, true); }
 }
 
 async function loadPreviews() {
@@ -390,20 +598,31 @@ async function loadPreviews() {
   }
   tbody.innerHTML = "";
   empty.classList.toggle("hidden", state.pendingPreviews.length !== 0);
-  for (const cap of state.pendingPreviews) {
+  for (const [i, cap] of state.pendingPreviews.entries()) {
     const maxRssi = Number(cap.max_rssi ?? -120);
     const typeLabel = cap.signal_type === "rssi_only" ? "RSSI-only" : "Decoded";
     const tr = document.createElement("tr");
     tr.innerHTML = `
+      <td class="row-num">${i + 1}</td>
       <td>${formatDate(cap.ts)}</td>
       <td>${Math.round(maxRssi)} dBm</td>
       <td>${typeLabel}: ${cap.packet_count || cap.event_count}</td>
       <td>${Number(cap.frequency).toFixed(2)}</td>
+      <td class="decoded-cell">${autoDecodePreview(cap)}</td>
+      <td><input class="preview-note" type="text" value="${cap.note || ""}" placeholder="note"></td>
       <td><div class="inline">
         <button class="btn small review">Review</button>
         <button class="btn small primary keep">Keep</button>
         <button class="btn small danger discard">Discard</button>
       </div></td>`;
+    tr.querySelector(".preview-note").addEventListener("blur", async (event) => {
+      try {
+        await api(`/api/captures/${encodeURIComponent(cap.id)}/note`, { method: "POST", body: { note: event.target.value } });
+        cap.note = event.target.value;
+      } catch (err) {
+        alert(err.message);
+      }
+    });
     tr.querySelector(".review").addEventListener("click", () => reviewCapture(cap));
     tr.querySelector(".keep").addEventListener("click", () => keepCapture(cap));
     tr.querySelector(".discard").addEventListener("click", () => discardCapture(cap));
@@ -444,13 +663,19 @@ async function loadLibrary() {
   for (const cap of visible) {
     const card = document.createElement("article");
     card.className = `panel capture-card${cap.preview ? " preview" : ""}`;
+    const isRtl = cap.signal_type === "rtl_decoded";
+    const rtlModels = isRtl && cap.rtl_signals?.length
+      ? [...new Set(cap.rtl_signals.map(s => s.model || "?"))].slice(0, 3).join(", ")
+      : null;
     card.innerHTML = `
       <div class="capture-card-head">
         <span class="capture-name">${cap.name}</span>
         ${cap.preview ? '<span class="badge preview-badge">PREVIEW</span>' : ""}
+        ${isRtl ? '<span class="badge rtl">RTL DECODED</span>' : ""}
         <span class="badge">${Number(cap.frequency).toFixed(2)} MHz · ${cap.modulation}</span>
-        <span class="badge">${cap.packet_count} packets</span>
+        ${isRtl ? `<span class="badge">${cap.rtl_count || 0} signals</span>` : `<span class="badge">${cap.packet_count} packets</span>`}
       </div>
+      ${rtlModels ? `<div class="rtl-summary">${rtlModels}</div>` : ""}
       <div class="capture-time">${formatDate(cap.ts)}</div>
       <label class="folder-field">Folder <input class="folder-input" type="text" value="${cap.folder || ""}" placeholder="Unfiled"></label>
       <label class="note-field">Note <textarea rows="2" placeholder="Add a note...">${cap.note || ""}</textarea></label>
@@ -493,6 +718,22 @@ function loadReplay(capture) {
   $("replay-panel").classList.remove("hidden");
   $("replay-name").textContent = capture.name;
   $("replay-meta").textContent = `${Number(capture.frequency).toFixed(2)} MHz · ${capture.modulation} · ${capture.packet_count} packets`;
+  // Show RTL decode context if available
+  let ctx = $("replay-decode-context");
+  if (!ctx) {
+    ctx = document.createElement("div");
+    ctx.id = "replay-decode-context";
+    ctx.className = "decode-context hidden";
+    $("replay-packets").before(ctx);
+  }
+  if (capture.rtl_signals?.length) {
+    const sig = capture.rtl_signals[0];
+    const fields = Object.entries(sig).filter(([k]) => !["time","model","freq","freq1","freq2","rssi","snr","noise","mod","ook_symbols","ook_bitrate"].includes(k) && !k.startsWith("_")).map(([k,v]) => `${k}: ${v}`).join("  ·  ");
+    ctx.innerHTML = `<span class="decode-context-label">Decoded as:</span>${sig.model || "?"} — ${fields}`;
+    ctx.classList.remove("hidden");
+  } else {
+    ctx.classList.add("hidden");
+  }
   const firstTs = capture.packets[0]?.ts || 0;
   const packetList = $("replay-packets");
   packetList.innerHTML = "";
@@ -562,7 +803,7 @@ async function updateApp() {
 }
 
 async function restartApp() {
-  if (!confirm("Restart Casper now? The page will reload after the service comes back.")) return;
+  if (!await customConfirm("Restart Casper now? The page will reload after the service comes back.", "Restart")) return;
   const btn = $("restart-app");
   btn.disabled = true;
   setMessage("update-status", "Restarting Casper service...");
@@ -615,6 +856,12 @@ $("apply-config").addEventListener("click", async () => {
     setMessage("config-message", err.message, true);
   }
 });
+$("decode-start-both").addEventListener("click", startDecodeAndCapture);
+$("decode-start-rtl").addEventListener("click", startDecodeOnly);
+$("decode-stop").addEventListener("click", stopDecode);
+$("decode-save-session").addEventListener("click", saveDecodeSession);
+$("decode-freq").addEventListener("change", () => { $("frequency").value = $("decode-freq").value; });
+$("frequency").addEventListener("change", () => { $("decode-freq").value = $("frequency").value; });
 $("start-capture").addEventListener("click", startCapture);
 $("stop-capture").addEventListener("click", stopCapture);
 $("start-monitor").addEventListener("click", startMonitor);
@@ -625,6 +872,12 @@ $("show-save").addEventListener("click", () => $("save-form").classList.toggle("
 $("save-capture").addEventListener("click", saveCapture);
 $("refresh-library").addEventListener("click", loadLibrary);
 $("refresh-previews").addEventListener("click", loadPreviews);
+$("clear-previews").addEventListener("click", async () => {
+  if (!state.pendingPreviews.length) return;
+  if (!await customConfirm(`Discard all ${state.pendingPreviews.length} saved previews?`, "Discard All")) return;
+  await Promise.all(state.pendingPreviews.map((cap) => api(`/api/captures/${encodeURIComponent(cap.id)}`, { method: "DELETE" }).catch(() => {})));
+  await loadPreviews();
+});
 $("close-decode").addEventListener("click", () => $("decode-panel").classList.add("hidden"));
 $("select-all").addEventListener("click", () => document.querySelectorAll("#replay-packets input").forEach((el) => { el.checked = true; }));
 $("select-none").addEventListener("click", () => document.querySelectorAll("#replay-packets input").forEach((el) => { el.checked = false; }));

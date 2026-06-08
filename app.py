@@ -41,6 +41,8 @@ _state = {
     "monitoring": False,
     "auto_armed": False,
     "last_error": "",
+    "rtl_active": False,
+    "rtl_signals": [],
 }
 _capture_thread = None
 _capture_running = False
@@ -48,6 +50,9 @@ _monitor_thread = None
 _monitor_running = False
 _auto_thread = None
 _auto_running = False
+_rtl_proc    = None
+_rtl_thread  = None
+_rtl_running = False
 _sse_clients = []
 
 
@@ -273,6 +278,162 @@ def _sse_push(data):
             pass
 
 
+# ── CC1101 raw register helpers ──────────────────────────────────────────────
+
+def _cc1101_write_reg(t, address, value):
+    t._spi.xfer([address & 0x3F, value & 0xFF])
+
+def _cc1101_rxbytes(t):
+    """Returns (count, overflow_flag) for RX FIFO."""
+    val = t._spi.xfer([0xFB, 0x00])[1]   # 0x3B|0xC0 = RXBYTES burst-read
+    return val & 0x7F, bool(val & 0x80)
+
+def _cc1101_read_fifo(t, n):
+    """Burst-read n bytes from RX FIFO."""
+    result = t._spi.xfer([0xFF] + [0x00] * n)   # 0x3F|0xC0 = FIFO burst-read
+    return bytes(result[1:])
+
+def _cc1101_flush_rx(t):
+    """Flush RX FIFO and re-enter RX."""
+    t._spi.xfer([0x36])   # SIDLE
+    t._spi.xfer([0x3A])   # SFRX
+    _enter_receive_mode(t)
+
+
+def _run_raw_capture(cfg):
+    """
+    Raw OOK capture: sync-word disabled, infinite packet length, FIFO polling.
+    Collects bytes while RSSI > threshold, saves each burst as a packet.
+    """
+    global _capture_running
+
+    RSSI_THRESHOLD = -82   # dBm — above this = signal present
+    BURST_GAP_SEC  = 0.15  # 150ms silence after last byte = burst ended
+    POLL_SEC       = 0.008 # 8ms polling interval
+
+    try:
+        if cc1101 is None:
+            raise RuntimeError(f"cc1101 package unavailable: {CC1101_IMPORT_ERROR}")
+        with cc1101.CC1101() as t:
+            t.set_base_frequency_hertz(float(cfg["frequency"]) * 1e6)
+            t.set_symbol_rate_baud(int(cfg["symbol_rate"]))
+
+            # Raw OOK mode:
+            # MDMCFG2 = 0x30 → MOD_FORMAT=OOK (bits 6:4=011), SYNC_MODE=0 (no sync)
+            # PKTCTRL0 = 0x02 → LENGTH_CONFIG=infinite (bits 1:0=10), CRC_EN=0
+            _cc1101_write_reg(t, 0x12, 0x30)
+            _cc1101_write_reg(t, 0x08, 0x02)
+            _enter_receive_mode(t)
+
+            burst_buf = bytearray()
+            last_sig  = 0.0
+            in_burst  = False
+
+            while _capture_running:
+                rssi = _read_rssi_dbm(t)
+                with _lock:
+                    _state["rssi"] = rssi
+                _sse_push({"type": "rssi", "value": rssi})
+
+                n, overflow = _cc1101_rxbytes(t)
+
+                if overflow:
+                    _cc1101_flush_rx(t)
+                    burst_buf.clear()
+                    in_burst = False
+                    time.sleep(POLL_SEC)
+                    continue
+
+                if rssi > RSSI_THRESHOLD and n > 0:
+                    burst_buf.extend(_cc1101_read_fifo(t, n))
+                    last_sig = time.time()
+                    in_burst = True
+                elif not in_burst and n > 0:
+                    _cc1101_read_fifo(t, n)   # discard noise bytes
+
+                if in_burst and burst_buf and (time.time() - last_sig) > BURST_GAP_SEC:
+                    entry = {
+                        "ts":   last_sig,
+                        "rssi": rssi,
+                        "hex":  burst_buf.hex(),
+                        "len":  len(burst_buf),
+                        "raw":  True,
+                    }
+                    with _lock:
+                        _state["packets"].append(entry)
+                    _sse_push({"type": "packet", **entry})
+                    burst_buf.clear()
+                    in_burst = False
+
+                time.sleep(POLL_SEC)
+
+    except Exception as exc:
+        msg = str(exc)
+        with _lock:
+            _state["last_error"] = msg
+        _sse_push({"type": "error", "msg": msg})
+    finally:
+        with _lock:
+            _state["capturing"] = False
+        _capture_running = False
+
+
+def _run_rtl433(freq_mhz):
+    global _rtl_running, _rtl_proc
+    cmd = ["rtl_433", "-f", f"{freq_mhz}M", "-F", "json", "-M", "time:utc", "-F", "log"]
+    try:
+        _rtl_proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, bufsize=1,
+        )
+        for line in _rtl_proc.stdout:
+            if not _rtl_running:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                with _lock:
+                    _state["rtl_signals"].append(data)
+                _sse_push({"type": "rtl_signal", "data": data})
+            except json.JSONDecodeError:
+                pass
+    except Exception as exc:
+        _sse_push({"type": "error", "msg": f"rtl_433: {exc}"})
+    finally:
+        if _rtl_proc:
+            try:
+                _rtl_proc.terminate()
+                _rtl_proc.wait(timeout=3)
+            except Exception:
+                try:
+                    _rtl_proc.kill()
+                except Exception:
+                    pass
+        _rtl_running = False
+        with _lock:
+            _state["rtl_active"] = False
+        _sse_push({"type": "rtl_stopped"})
+
+
+import atexit
+
+@atexit.register
+def _cleanup_rtl():
+    global _rtl_running
+    _rtl_running = False
+    if _rtl_proc:
+        try:
+            _rtl_proc.terminate()
+            _rtl_proc.wait(timeout=2)
+        except Exception:
+            try:
+                _rtl_proc.kill()
+            except Exception:
+                pass
+
+
 def _run_capture(cfg):
     global _capture_running
     try:
@@ -486,6 +647,8 @@ def api_status():
         rssi = _state["rssi"]
         packet_count = len(_state["packets"])
         last_error = _state["last_error"]
+        rtl_active = _state["rtl_active"]
+        rtl_count = len(_state["rtl_signals"])
     chip = {"chip_ok": True, "marcstate": "RX" if capturing or monitoring or auto_armed else "IDLE", "error": ""}
     if not capturing and not monitoring and not auto_armed:
         chip = _status_from_chip()
@@ -500,6 +663,8 @@ def api_status():
         "rssi": rssi,
         "packet_count": packet_count,
         "error": chip.get("error", ""),
+        "rtl_active": rtl_active,
+        "rtl_count": rtl_count,
     })
 
 
@@ -507,6 +672,114 @@ def api_status():
 def api_version():
     check_remote = request.args.get("check") in {"1", "true", "yes"}
     return jsonify(git_version_payload(check_remote))
+
+
+@app.post("/api/rtl/start")
+def api_rtl_start():
+    global _rtl_thread, _rtl_running
+    with _lock:
+        if _state["rtl_active"]:
+            return jsonify({"error": "rtl_433 already running"}), 409
+        freq = float(request.get_json(silent=True, force=True).get("frequency", _state["config"]["frequency"]) if request.data else _state["config"]["frequency"])
+        _state["rtl_signals"] = []
+        _state["rtl_active"] = True
+    _rtl_running = True
+    _rtl_thread = threading.Thread(target=_run_rtl433, args=(freq,), daemon=True)
+    _rtl_thread.start()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/rtl/stop")
+def api_rtl_stop():
+    global _rtl_running, _rtl_proc
+    _rtl_running = False
+    if _rtl_proc:
+        try:
+            _rtl_proc.terminate()
+        except Exception:
+            pass
+    if _rtl_thread and _rtl_thread.is_alive():
+        _rtl_thread.join(timeout=3)
+    with _lock:
+        _state["rtl_active"] = False
+    return jsonify({"ok": True})
+
+
+@app.post("/api/decode/start")
+def api_decode_start():
+    """Start rtl_433 + CC1101 capture simultaneously."""
+    global _rtl_thread, _rtl_running, _capture_thread, _capture_running
+    body = request.get_json(silent=True) or {}
+    with _lock:
+        freq = float(body.get("frequency", _state["config"]["frequency"]))
+        rtl_already = _state["rtl_active"]
+        cc_already = _state["capturing"]
+        _state["config"]["frequency"] = freq
+        if not rtl_already:
+            _state["rtl_signals"] = []
+            _state["rtl_active"] = True
+        if not cc_already:
+            _state["packets"] = []
+            _state["rssi"] = -120
+            _state["capturing"] = True
+            _state["last_error"] = ""
+        cfg = dict(_state["config"])
+    rtl_ok = True
+    cc_ok = True
+    if not rtl_already:
+        _rtl_running = True
+        _rtl_thread = threading.Thread(target=_run_rtl433, args=(freq,), daemon=True)
+        _rtl_thread.start()
+    if not cc_already:
+        _capture_running = True
+        _capture_thread = threading.Thread(target=_run_raw_capture, args=(cfg,), daemon=True)
+        _capture_thread.start()
+    return jsonify({"ok": True, "rtl": rtl_ok, "cc1101": cc_ok})
+
+
+@app.post("/api/decode/stop")
+def api_decode_stop():
+    global _rtl_running, _rtl_proc, _capture_running
+    _rtl_running = False
+    _capture_running = False
+    if _rtl_proc:
+        try:
+            _rtl_proc.terminate()
+        except Exception:
+            pass
+    if _rtl_thread and _rtl_thread.is_alive():
+        _rtl_thread.join(timeout=3)
+    if _capture_thread and _capture_thread.is_alive():
+        _capture_thread.join(timeout=3)
+    with _lock:
+        _state["rtl_active"] = False
+        _state["capturing"] = False
+    return jsonify({"ok": True})
+
+
+@app.post("/api/rtl/save")
+def api_rtl_save():
+    body = request.get_json(silent=True) or {}
+    name = _sanitize_name(body.get("name", "rtl_session"))
+    ts = int(time.time())
+    capture_id = f"{name}_{ts}"
+    path = CAPTURES_DIR / f"{capture_id}.json"
+    with _lock:
+        cfg = dict(_state["config"])
+        rtl_signals = list(_state["rtl_signals"])
+        packets = list(_state["packets"])
+    _write_capture(path, {
+        "name": name,
+        "ts": ts,
+        "frequency": cfg["frequency"],
+        "modulation": cfg["modulation"],
+        "symbol_rate": cfg["symbol_rate"],
+        "note": "",
+        "signal_type": "rtl_decoded",
+        "rtl_signals": rtl_signals,
+        "packets": packets,
+    })
+    return jsonify({"ok": True, "id": capture_id})
 
 
 @app.post("/api/update")
@@ -753,6 +1026,7 @@ def api_captures():
         packets = data.get("packets", [])
         events = data.get("events", [])
         rssi_values = [pkt.get("rssi", -120) for pkt in packets] + [evt.get("rssi", -120) for evt in events]
+        rtl_signals = data.get("rtl_signals", [])
         items.append({
             "id": path.stem,
             "name": data.get("name", path.stem),
@@ -762,6 +1036,8 @@ def api_captures():
             "symbol_rate": data.get("symbol_rate", 0),
             "packet_count": len(packets),
             "event_count": len(events),
+            "rtl_count": len(rtl_signals),
+            "rtl_signals": rtl_signals,
             "max_rssi": max(rssi_values) if rssi_values else -120,
             "signal_type": data.get("signal_type", "decoded"),
             "note": data.get("note", ""),
