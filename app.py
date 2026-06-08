@@ -97,10 +97,12 @@ def git_version_payload(check_remote=False):
 def _mod_map():
     if cc1101 is None:
         return {}
+    mod = cc1101.ModulationFormat
+    ook = getattr(mod, "OOK_ASK", None) or getattr(mod, "ASK_OOK")
     return {
-        "OOK": cc1101.ModulationFormat.OOK_ASK,
-        "FSK2": cc1101.ModulationFormat.FSK2,
-        "GFSK": cc1101.ModulationFormat.GFSK,
+        "OOK": ook,
+        "FSK2": mod.FSK2,
+        "GFSK": mod.GFSK,
     }
 
 
@@ -143,8 +145,29 @@ def _apply_config(t, cfg):
     if cfg["modulation"] not in mods:
         raise ValueError(f"unsupported modulation: {cfg['modulation']}")
     t.set_base_frequency_hertz(float(cfg["frequency"]) * 1e6)
-    t.set_modulation_format(mods[cfg["modulation"]])
+    if hasattr(t, "set_modulation_format"):
+        t.set_modulation_format(mods[cfg["modulation"]])
+    elif hasattr(t, "_set_modulation_format"):
+        t._set_modulation_format(mods[cfg["modulation"]])
+    else:
+        raise RuntimeError("cc1101 modulation setter is unavailable")
     t.set_symbol_rate_baud(int(cfg["symbol_rate"]))
+
+
+def _enter_receive_mode(t):
+    if hasattr(t, "_enable_receive_mode"):
+        t._enable_receive_mode()
+        return
+    strobe = getattr(cc1101.CC1101, "_SPI_COMMAND_STROBE_SRX", None)
+    if strobe is None:
+        raise RuntimeError("cc1101 receive strobe is unavailable")
+    t._command_strobe(strobe)
+
+
+def _read_rssi_dbm(t):
+    if hasattr(t, "get_rssi_dbm"):
+        return t.get_rssi_dbm()
+    return -120
 
 
 def _sse_push(data):
@@ -168,18 +191,20 @@ def _run_capture(cfg):
             raise RuntimeError(f"cc1101 package unavailable: {CC1101_IMPORT_ERROR}")
         with cc1101.CC1101() as t:
             _apply_config(t, cfg)
-            t._command_strobe(cc1101.CC1101._SPI_COMMAND_STROBE_SRX)
+            _enter_receive_mode(t)
             while _capture_running:
                 pkt = t._get_received_packet()
-                rssi = t.get_rssi_dbm()
+                rssi = _read_rssi_dbm(t)
                 with _lock:
                     _state["rssi"] = rssi
                 if pkt:
+                    payload = pkt.payload
+                    pkt_rssi = getattr(pkt, "rssi_dbm", rssi)
                     entry = {
                         "ts": time.time(),
-                        "rssi": pkt.rssi_dbm,
-                        "hex": pkt.payload.hex(),
-                        "len": len(pkt.payload),
+                        "rssi": pkt_rssi,
+                        "hex": payload.hex(),
+                        "len": len(payload),
                     }
                     with _lock:
                         _state["packets"].append(entry)
