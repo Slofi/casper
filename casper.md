@@ -1,7 +1,7 @@
 type:: project
 status:: planning
 tags:: #casper #cc1101 #rf #sdr #subghz
-updated:: 2026-06-08
+updated:: 2026-06-24
 
 # Casper
 
@@ -17,6 +17,8 @@ updated:: 2026-06-08
 | Port        | :5300 |
 | Platform    | Cyberdeck (Rock 5B, Armbian GNOME) |
 | Style       | Dark/amber — consistent with Banshee + Sonde App |
+| UX          | Capture-first handheld flow; auto-classifies saved signals for replay readiness |
+| Decode UX   | Capture tab shows simple packet descriptions; Decode tab handles rtl_433 protocol identification |
 
 ## Access
 
@@ -55,11 +57,19 @@ systemctl --user stop casper
 - [x] rtl_433 already installed (v23.11), confirmed working with RTL-SDR
 - [x] Add DECODE tab — rtl_433 + CC1101 simultaneous decode+capture
 - [x] Add Capture preview table with decoded summary + saved notes
+- [x] Capture-first UI: frequency chips, ARM/STOP/SAVE controls, scoped manual tools
+- [x] Signal self-inspection: quality labels, replayability, fingerprint, duplicate detection
+- [x] Capture tab packet descriptions + mirrored rtl_433 decoded messages during Decode + Capture
+- [x] Best Replay recommendation + auto preview duplicate merge by signal fingerprint
 - [ ] Re-sync/restart on Cyberdeck when CD is online again
 - [ ] Wire CC1101 GPS toggle switch on faceplate
 
 ## Changelog
 
+**2026-06-24** — Codex UX/autonomy pass: Capture is now the first screen with handheld-style frequency chips, live tuned/RSSI/buffer readouts, large ARM/STOP/SAVE controls, and manual tools collapsed into an advanced section. Saved signals are now self-inspected server-side with replayability labels (`Replay ready`, `Likely replayable`, `Needs review`, `Signal seen`, `No signal`), quality score, max RSSI, packet/repeat/unique counts, stable fingerprint, and duplicate count for real repeated signals. Library/previews/replay display quality badges; Replay auto-selects the most repeated payload and disables TX for non-replayable energy-only captures. Verified with Python compile, JS syntax check, and Flask test-client `/api/captures` check; live RF hardware path still needs CD validation.
+**2026-06-24** — Claude audit follow-up: `/api/replay` now enforces replayability server-side before TX, so browser-side disabling is no longer the only guard.
+**2026-06-24** — Capture/Decode UX clarification implemented: Capture tab raw packet buffer now includes a `Packet description` column with safe simple labels such as ASCII/text payload, repeated fixed-code style command, repeated payload, raw RF burst, raw/noisy burst, short pulse payload, weak signal, and byte count. A `Decoded / Identified` panel was added to Capture; rtl_433 messages from Decode Only or Decode + Capture are mirrored there while still appearing on the separate Decode tab. Decode tab remains the deeper protocol-identification view for rtl_433-supported devices.
+**2026-06-24** — Best Replay + duplicate handling pass: backend now emits `best_replay` metadata for each capture (`indices`, label, reason) and `/api/replay` uses it by default if no packet selection is supplied. Replay UI selects the recommended payload set and explains why. Auto previews now merge into an existing preview with the same signal fingerprint when still in Previews, recording `sightings` instead of filling the list with duplicate rows; UI shows merged `Seen Nx` badges.
 **2026-06-08** — Session checkpoint saved on Testbox: Capture tab has Saved Signal Previews table with decoded summary and per-preview notes; Auto Arm saves decoded and RSSI-only previews; Library has folders/notes; DECODE tab implementation is present in working tree. CD went offline during deploy, so re-sync/restart CD when back online. Current save commit pending/pushed from Testbox after this checkpoint.
 **2026-06-08** — rtl_433 confirmed installed (v23.11), DECODE tab brief written; custom confirm modal + preview UX polish (session 328)
 **2026-06-08** — CC1101 replacement wired + verified, SPI permissions fixed, launcher tile added (session 328)

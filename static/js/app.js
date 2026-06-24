@@ -77,6 +77,7 @@ function rssiWidth(rssi) {
 
 function updateRssi(rssi) {
   $("rssi-value").textContent = `${Math.round(rssi)} dBm`;
+  if ($("capture-rssi-readout")) $("capture-rssi-readout").textContent = `${Math.round(rssi)} dBm`;
   $("rssi-fill").style.width = `${rssiWidth(rssi)}%`;
 }
 
@@ -144,6 +145,7 @@ function setStatus(status) {
   $("start-auto").disabled = state.capturing || state.monitoring || state.autoArmed;
   $("stop-auto").disabled = !state.autoArmed;
   $("packet-counter").textContent = `${status.packet_count || state.packets.length} packets`;
+  if ($("capture-frequency-readout")) $("capture-frequency-readout").textContent = `${Number($("frequency").value || 433.92).toFixed(2)} MHz`;
   updateRssi(status.rssi ?? -120);
   renderReplayDisabled();
 }
@@ -165,6 +167,35 @@ function getConfig() {
   };
 }
 
+function setActiveFrequencyChip(freq) {
+  const rounded = Number(freq).toFixed(2);
+  document.querySelectorAll(".mode-chip.preset").forEach((btn) => {
+    btn.classList.toggle("active", Number(btn.dataset.frequency).toFixed(2) === rounded);
+  });
+  if ($("capture-frequency-readout")) $("capture-frequency-readout").textContent = `${rounded} MHz`;
+}
+
+async function applyCurrentConfig(silent = false) {
+  try {
+    await api("/api/config", { method: "POST", body: getConfig() });
+    setActiveFrequencyChip($("frequency").value);
+    if (!silent) {
+      setMessage("config-message", "Config applied");
+      setTimeout(() => setMessage("config-message", ""), 2000);
+    }
+  } catch (err) {
+    if (!silent) setMessage("config-message", err.message, true);
+    else setMessage("capture-error", err.message, true);
+  }
+}
+
+async function tuneFrequency(freq) {
+  $("frequency").value = Number(freq).toFixed(2);
+  if ($("decode-freq")) $("decode-freq").value = $("frequency").value;
+  setActiveFrequencyChip(freq);
+  await applyCurrentConfig(true);
+}
+
 function packetTime(ts) {
   return new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
@@ -173,12 +204,48 @@ function truncateHex(hex) {
   return hex.length > 32 ? `${hex.slice(0, 32)}...` : hex;
 }
 
+function simpleDecodePacket(packet) {
+  const hex = packet.hex || "";
+  if (!hex) return "No payload";
+  const bytes = [];
+  for (let i = 0; i < hex.length; i += 2) {
+    const value = parseInt(hex.slice(i, i + 2), 16);
+    if (Number.isFinite(value)) bytes.push(value);
+  }
+  const ascii = bytes.map((b) => (b >= 32 && b <= 126 ? String.fromCharCode(b) : ".")).join("");
+  const printable = ascii.replace(/\./g, "").length;
+  const repeats = state.packets.filter((pkt) => pkt.hex === hex).length;
+  const maxByte = bytes.length ? Math.max(...bytes) : 0;
+  const uniqueBytes = new Set(bytes).size;
+  const rssi = Number(packet.rssi ?? -120);
+  const parts = [];
+  if (printable >= Math.max(3, ascii.length * 0.5)) {
+    parts.push(`ASCII/text payload`);
+    parts.push(`"${ascii.slice(0, 24)}${ascii.length > 24 ? "..." : ""}"`);
+  } else if (packet.raw && bytes.length > 32 && uniqueBytes > bytes.length * 0.45) {
+    parts.push("Raw/noisy burst");
+  } else if (repeats >= 2 && bytes.length <= 16) {
+    parts.push("Repeated fixed-code style command");
+  } else if (repeats >= 2) {
+    parts.push("Repeated payload");
+  } else if (bytes.length <= 3) {
+    parts.push("Short pulse payload");
+  } else {
+    parts.push(packet.raw ? "Raw RF burst" : "Binary payload");
+  }
+  if (maxByte === 0) parts.push("all zeroes");
+  if (rssi < -95) parts.push("weak signal");
+  if (repeats > 1) parts.push(`seen ${repeats}x`);
+  parts.push(`${bytes.length} byte${bytes.length === 1 ? "" : "s"}`);
+  return parts.join(" · ");
+}
+
 function addPacketRow(packet, prepend = true) {
   const tbody = $("packet-table");
   const tr = document.createElement("tr");
   const idx = state.packets.length;
   const rawTag = packet.raw ? ' <span class="badge" style="font-size:0.65rem;padding:1px 4px;">RAW</span>' : '';
-  tr.innerHTML = `<td>${idx}</td><td>${packetTime(packet.ts)}</td><td>${Math.round(packet.rssi)}</td><td>${packet.len}${rawTag}</td><td title="${packet.hex}">${truncateHex(packet.hex)}</td>`;
+  tr.innerHTML = `<td>${idx}</td><td>${packetTime(packet.ts)}</td><td>${Math.round(packet.rssi)}</td><td>${packet.len}${rawTag}</td><td>${simpleDecodePacket(packet)}</td><td title="${packet.hex}">${truncateHex(packet.hex)}</td>`;
   if (prepend) tbody.prepend(tr);
   else tbody.append(tr);
   while (tbody.children.length > 500) tbody.lastElementChild.remove();
@@ -219,6 +286,7 @@ function startSse() {
     if (data.type === "rtl_signal") {
       state.rtlSignals.push(data.data);
       prependRtlCard(data.data);
+      prependCaptureDecodeCard(data.data);
       updateDecodeStatus();
     }
     if (data.type === "rtl_stopped") {
@@ -240,6 +308,7 @@ async function startCapture() {
   setMessage("capture-error", "");
   $("packet-table").innerHTML = "";
   state.packets = [];
+  resetCaptureDecodeFeed("Manual capture records packets here; use Decode + Capture to identify known protocols.");
   try {
     await api("/api/capture/start", { method: "POST" });
     startSse();
@@ -281,6 +350,7 @@ async function startAuto() {
   state.peakRssi = -120;
   $("packet-table").innerHTML = "";
   state.packets = [];
+  resetCaptureDecodeFeed("ARM records signal events here; use Decode + Capture to identify known protocols.");
   $("auto-status").textContent = "Auto armed";
   drawSignal();
   try {
@@ -364,6 +434,20 @@ function autoDecodePreview(cap) {
     : `<code>${topHex.length > 20 ? topHex.slice(0, 18) + '…' : topHex}</code>`;
   const rpt = freq[topHex];
   return rpt > 1 ? `${label} ×${rpt}` : label;
+}
+
+function qualityBadge(quality = {}) {
+  const level = quality.level || "empty";
+  const label = quality.label || "Unknown";
+  const score = Number.isFinite(quality.score) ? ` ${quality.score}` : "";
+  return `<span class="quality-badge ${level}" title="${(quality.reasons || []).join(", ")}">${label}${score}</span>`;
+}
+
+function duplicateBadge(cap) {
+  const count = Math.max(cap.sighting_count || 0, (cap.duplicate_count || 0) + 1);
+  return count > 1
+    ? `<span class="quality-badge weak" title="Same signal fingerprint seen before">Seen ${count}x</span>`
+    : "";
 }
 
 function formatDecode(data) {
@@ -488,6 +572,54 @@ function prependRtlCard(sig) {
   feed.prepend(card);
 }
 
+function prependCaptureDecodeCard(sig) {
+  const feed = $("capture-decode-feed");
+  const empty = $("capture-decode-empty");
+  const count = $("capture-decode-count");
+  if (!feed) return;
+  if (empty) empty.classList.add("hidden");
+  const model = sig.model || "Unrecognised";
+  const ts = sig.time || new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const rssi = sig.rssi != null ? `${Math.round(sig.rssi)} dBm` : "";
+  const fields = formatRtlFields(sig);
+  const card = document.createElement("div");
+  card.className = "rtl-card capture-rtl-card";
+  card.innerHTML = `
+    <div class="rtl-card-head">
+      <span class="rtl-card-model">${model}</span>
+      <span class="rtl-card-time">${ts}</span>
+      ${rssi ? `<span class="rtl-card-rssi">${rssi}</span>` : ""}
+    </div>
+    <div class="rtl-card-fields">${fields || '<span class="rtl-card-field"><span class="rtl-card-field-key">decode:</span> <span class="rtl-card-field-val">protocol identified, no extra fields</span></span>'}</div>
+    <div class="rtl-card-actions">
+      <button class="btn small primary prep-replay">Load Replay</button>
+      <button class="btn small save-one">Save</button>
+    </div>`;
+  card.querySelector(".prep-replay").addEventListener("click", () => prepRtlForReplay(sig));
+  card.querySelector(".save-one").addEventListener("click", async () => {
+    try {
+      const id = await api("/api/rtl/save", { method: "POST", body: { name: model.replace(/[^\w]/g, "_") } });
+      setMessage("capture-error", `Decoded session saved: ${id.id}`, false);
+      setTimeout(() => setMessage("capture-error", ""), 3000);
+    } catch (err) { setMessage("capture-error", err.message, true); }
+  });
+  feed.prepend(card);
+  while (feed.children.length > 20) feed.lastElementChild.remove();
+  if (count) count.textContent = `${state.rtlSignals.length} decoded`;
+}
+
+function resetCaptureDecodeFeed(message = "Start Decode + Capture to identify known devices here.") {
+  const feed = $("capture-decode-feed");
+  const empty = $("capture-decode-empty");
+  const count = $("capture-decode-count");
+  if (feed) feed.innerHTML = "";
+  if (empty) {
+    empty.textContent = message;
+    empty.classList.remove("hidden");
+  }
+  if (count) count.textContent = "0 decoded";
+}
+
 function prepRtlForReplay(sig) {
   const freq = sig.freq != null ? (sig.freq / 1e6) : Number($("decode-freq").value);
   $("frequency").value = freq.toFixed(2);
@@ -534,6 +666,7 @@ async function startDecodeAndCapture() {
   state.packets = [];
   $("decode-feed").innerHTML = "";
   $("packet-table").innerHTML = "";
+  resetCaptureDecodeFeed("Listening for known devices...");
   if ($("decode-empty")) $("decode-empty").classList.remove("hidden");
   const freq = Number($("decode-freq").value);
   $("frequency").value = freq.toFixed(2);
@@ -552,6 +685,7 @@ async function startDecodeOnly() {
   setMessage("decode-error", "");
   state.rtlSignals = [];
   $("decode-feed").innerHTML = "";
+  resetCaptureDecodeFeed("Decode Only is active; identified messages appear here and on the Decode tab.");
   if ($("decode-empty")) $("decode-empty").classList.remove("hidden");
   const freq = Number($("decode-freq").value);
   $("frequency").value = freq.toFixed(2);
@@ -605,6 +739,7 @@ async function loadPreviews() {
     tr.innerHTML = `
       <td class="row-num">${i + 1}</td>
       <td>${formatDate(cap.ts)}</td>
+      <td>${qualityBadge(cap.quality)} ${duplicateBadge(cap)}</td>
       <td>${Math.round(maxRssi)} dBm</td>
       <td>${typeLabel}: ${cap.packet_count || cap.event_count}</td>
       <td>${Number(cap.frequency).toFixed(2)}</td>
@@ -672,6 +807,8 @@ async function loadLibrary() {
         <span class="capture-name">${cap.name}</span>
         ${cap.preview ? '<span class="badge preview-badge">PREVIEW</span>' : ""}
         ${isRtl ? '<span class="badge rtl">RTL DECODED</span>' : ""}
+        ${qualityBadge(cap.quality)}
+        ${duplicateBadge(cap)}
         <span class="badge">${Number(cap.frequency).toFixed(2)} MHz · ${cap.modulation}</span>
         ${isRtl ? `<span class="badge">${cap.rtl_count || 0} signals</span>` : `<span class="badge">${cap.packet_count} packets</span>`}
       </div>
@@ -718,6 +855,7 @@ function loadReplay(capture) {
   $("replay-panel").classList.remove("hidden");
   $("replay-name").textContent = capture.name;
   $("replay-meta").textContent = `${Number(capture.frequency).toFixed(2)} MHz · ${capture.modulation} · ${capture.packet_count} packets`;
+  const quality = capture.quality || {};
   // Show RTL decode context if available
   let ctx = $("replay-decode-context");
   if (!ctx) {
@@ -737,13 +875,19 @@ function loadReplay(capture) {
   const firstTs = capture.packets[0]?.ts || 0;
   const packetList = $("replay-packets");
   packetList.innerHTML = "";
+  const bestReplay = capture.best_replay || {};
+  const bestIndices = new Set(bestReplay.indices || []);
   capture.packets.forEach((pkt, index) => {
     const offset = Math.round(((pkt.ts || firstTs) - firstTs) * 1000);
     const row = document.createElement("label");
     row.className = "replay-row";
-    row.innerHTML = `<input type="checkbox" value="${index}" checked><span>#${index}</span><span>${offset} ms</span><span>${Math.round(pkt.rssi)} dBm</span><span class="hex" title="${pkt.hex}">${truncateHex(pkt.hex)}</span>`;
+    const checked = bestIndices.size ? bestIndices.has(index) : true;
+    row.innerHTML = `<input type="checkbox" value="${index}" ${checked ? "checked" : ""}><span>#${index}</span><span>${offset} ms</span><span>${Math.round(pkt.rssi)} dBm</span><span class="hex" title="${pkt.hex}">${truncateHex(pkt.hex)}</span>`;
     packetList.append(row);
   });
+  $("replay-capture-note").innerHTML = quality.replayable
+    ? `${qualityBadge(quality)} ${bestReplay.label || "Recommended replay"}: ${bestReplay.reason || (quality.reasons || []).join(" · ")}`
+    : `${qualityBadge(quality)} Not replayable until payload packets are decoded.`;
   switchTab("replay");
   renderReplayDisabled();
 }
@@ -754,9 +898,10 @@ function selectedReplayIndices() {
 
 function renderReplayDisabled() {
   const tx = $("transmit");
-  const disabled = state.capturing || !state.loadedCapture;
+  const replayable = Boolean(state.loadedCapture?.quality?.replayable ?? state.loadedCapture?.packets?.length);
+  const disabled = state.capturing || !state.loadedCapture || !replayable;
   tx.disabled = disabled;
-  $("replay-capture-note").textContent = state.capturing ? "Stop capture first" : "";
+  if (state.capturing) $("replay-capture-note").textContent = "Stop capture first";
 }
 
 async function loadVersionStatus(checkRemote = false) {
@@ -845,23 +990,16 @@ $("settings-toggle").addEventListener("click", () => setSettingsOpen($("settings
 document.addEventListener("click", (event) => {
   if (!$("settings-wrap").contains(event.target)) setSettingsOpen(false);
 });
-document.querySelectorAll(".preset").forEach((btn) => btn.addEventListener("click", () => { $("frequency").value = btn.dataset.frequency; }));
+document.querySelectorAll(".preset").forEach((btn) => btn.addEventListener("click", () => tuneFrequency(btn.dataset.frequency)));
+document.querySelectorAll(".mode-chip[data-tab]").forEach((btn) => btn.addEventListener("click", () => switchTab(btn.dataset.tab)));
 $("symbol-rate").addEventListener("change", () => $("custom-symbol-rate").classList.toggle("hidden", $("symbol-rate").value !== "custom"));
-$("apply-config").addEventListener("click", async () => {
-  try {
-    await api("/api/config", { method: "POST", body: getConfig() });
-    setMessage("config-message", "Config applied");
-    setTimeout(() => setMessage("config-message", ""), 2000);
-  } catch (err) {
-    setMessage("config-message", err.message, true);
-  }
-});
+$("apply-config").addEventListener("click", () => applyCurrentConfig(false));
 $("decode-start-both").addEventListener("click", startDecodeAndCapture);
 $("decode-start-rtl").addEventListener("click", startDecodeOnly);
 $("decode-stop").addEventListener("click", stopDecode);
 $("decode-save-session").addEventListener("click", saveDecodeSession);
 $("decode-freq").addEventListener("change", () => { $("frequency").value = $("decode-freq").value; });
-$("frequency").addEventListener("change", () => { $("decode-freq").value = $("frequency").value; });
+$("frequency").addEventListener("change", () => { $("decode-freq").value = $("frequency").value; setActiveFrequencyChip($("frequency").value); });
 $("start-capture").addEventListener("click", startCapture);
 $("stop-capture").addEventListener("click", stopCapture);
 $("start-monitor").addEventListener("click", startMonitor);
@@ -887,6 +1025,7 @@ $("update-app").addEventListener("click", updateApp);
 $("restart-app").addEventListener("click", restartApp);
 
 refreshStatus();
+setActiveFrequencyChip($("frequency").value);
 drawSignal();
 loadPreviews();
 loadVersionStatus(false);

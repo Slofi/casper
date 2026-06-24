@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import glob
+import hashlib
 import json
 import os
 import queue
@@ -157,12 +158,27 @@ def _write_capture(path, data):
     tmp.replace(path)
 
 
+def _find_preview_by_fingerprint(fingerprint):
+    if not fingerprint:
+        return None, None
+    for filename in glob.glob(str(CAPTURES_DIR / "*.json")):
+        path = Path(filename)
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            continue
+        if not data.get("preview"):
+            continue
+        if _capture_fingerprint(data) == fingerprint:
+            return path, data
+    return None, None
+
+
 def _save_capture_file(name, cfg, packets, preview=False, folder="", events=None, signal_type="decoded"):
     ts = int(time.time())
     safe_name = _sanitize_name(name)
-    capture_id = f"{safe_name}_{ts}"
-    path = CAPTURES_DIR / f"{capture_id}.json"
-    _write_capture(path, {
+    payload = {
         "name": safe_name,
         "ts": ts,
         "frequency": cfg["frequency"],
@@ -174,7 +190,32 @@ def _save_capture_file(name, cfg, packets, preview=False, folder="", events=None
         "signal_type": signal_type,
         "events": events or [],
         "packets": packets,
-    })
+    }
+    quality = None
+    if preview:
+        fingerprint = _capture_fingerprint(payload)
+        quality = _classify_capture(payload)
+        existing_path, existing = _find_preview_by_fingerprint(fingerprint)
+        if existing_path is not None:
+            sightings = existing.setdefault("sightings", [])
+            sightings.append({
+                "ts": ts,
+                "max_rssi": quality["max_rssi"],
+                "packet_count": len(packets),
+                "event_count": len(events or []),
+            })
+            existing["ts"] = ts
+            existing["events"] = (existing.get("events") or []) + (events or [])
+            if len(existing["events"]) > 400:
+                existing["events"] = existing["events"][-400:]
+            _write_capture(existing_path, existing)
+            return existing_path.stem
+    capture_id = f"{safe_name}_{ts}"
+    path = CAPTURES_DIR / f"{capture_id}.json"
+    if quality is None:
+        quality = _classify_capture(payload)
+    payload["sightings"] = [{"ts": ts, "max_rssi": quality["max_rssi"], "packet_count": len(packets), "event_count": len(events or [])}]
+    _write_capture(path, payload)
     return capture_id
 
 
@@ -225,6 +266,135 @@ def _decode_capture(data):
         "unique_payloads": len(grouped),
         "repeats": repeats[:20],
         "packets": decoded_packets,
+        "quality": _classify_capture(data),
+    }
+
+
+def _capture_fingerprint(data):
+    packets = data.get("packets", [])
+    events = data.get("events", [])
+    parts = [
+        f"freq:{round(float(data.get('frequency', 0)), 2)}",
+        f"mod:{data.get('modulation', '')}",
+        f"rate:{data.get('symbol_rate', 0)}",
+    ]
+    if packets:
+        counts = {}
+        for pkt in packets:
+            hex_payload = pkt.get("hex", "")
+            if hex_payload:
+                counts[hex_payload] = counts.get(hex_payload, 0) + 1
+        for payload, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:8]:
+            parts.append(f"{count}x:{payload}")
+    elif events:
+        base = events[0].get("ts", 0) or 0
+        for evt in events[::max(1, len(events) // 16)]:
+            offset = round((evt.get("ts", base) - base) * 10)
+            rssi_bucket = round((evt.get("rssi", -120) + 120) / 5)
+            parts.append(f"{offset}:{rssi_bucket}")
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:12]
+
+
+def _classify_capture(data):
+    packets = data.get("packets", [])
+    events = data.get("events", [])
+    rssi_values = [pkt.get("rssi", -120) for pkt in packets] + [evt.get("rssi", -120) for evt in events]
+    max_rssi = max(rssi_values) if rssi_values else -120
+    packet_count = len(packets)
+    event_count = len(events)
+    payload_counts = {}
+    for pkt in packets:
+        payload = pkt.get("hex", "")
+        if payload:
+            payload_counts[payload] = payload_counts.get(payload, 0) + 1
+    repeated = max(payload_counts.values()) if payload_counts else 0
+    unique_payloads = len(payload_counts)
+    signal_type = data.get("signal_type", "decoded")
+    replayable = packet_count > 0 and signal_type != "rssi_only"
+    score = 0
+    reasons = []
+    if replayable:
+        score += 35
+        reasons.append("payload decoded")
+    if repeated >= 2:
+        score += 25
+        reasons.append("repeat observed")
+    if packet_count >= 3:
+        score += 15
+        reasons.append("multiple packets")
+    if max_rssi >= -75:
+        score += 15
+        reasons.append("strong signal")
+    elif max_rssi >= -90:
+        score += 8
+        reasons.append("usable signal")
+    if unique_payloads > 0 and unique_payloads <= max(1, packet_count // 2):
+        score += 10
+        reasons.append("stable payload")
+    if signal_type == "rssi_only":
+        reasons.append("energy only")
+    if not packets and events:
+        score = min(score, 25)
+    level = "empty"
+    label = "No signal"
+    if replayable and score >= 75:
+        level = "good"
+        label = "Replay ready"
+    elif replayable and score >= 45:
+        level = "ok"
+        label = "Likely replayable"
+    elif replayable:
+        level = "weak"
+        label = "Needs review"
+    elif events:
+        level = "energy"
+        label = "Signal seen"
+    return {
+        "level": level,
+        "label": label,
+        "score": min(100, score),
+        "replayable": replayable,
+        "fingerprint": _capture_fingerprint(data),
+        "max_rssi": max_rssi,
+        "packet_count": packet_count,
+        "event_count": event_count,
+        "unique_payloads": unique_payloads,
+        "top_repeat": repeated,
+        "reasons": reasons[:5],
+    }
+
+
+def _best_replay(data):
+    packets = data.get("packets", [])
+    quality = _classify_capture(data)
+    if not quality["replayable"] or not packets:
+        return {
+            "indices": [],
+            "label": "Not replayable",
+            "reason": quality["label"],
+        }
+    grouped = {}
+    for idx, pkt in enumerate(packets):
+        payload = pkt.get("hex", "")
+        if not payload:
+            continue
+        group = grouped.setdefault(payload, {"indices": [], "count": 0, "max_rssi": -120, "len": pkt.get("len", 0)})
+        group["indices"].append(idx)
+        group["count"] += 1
+        group["max_rssi"] = max(group["max_rssi"], pkt.get("rssi", -120))
+    if not grouped:
+        return {"indices": [0], "label": "First packet", "reason": "single payload"}
+    payload, group = sorted(
+        grouped.items(),
+        key=lambda item: (item[1]["count"], item[1]["max_rssi"], -abs(item[1]["len"] - 8)),
+        reverse=True,
+    )[0]
+    label = "Most repeated payload" if group["count"] > 1 else "Strongest payload"
+    return {
+        "indices": group["indices"],
+        "payload": payload,
+        "label": label,
+        "reason": f"{group['count']}x · peak {round(group['max_rssi'])} dBm · {group['len']} bytes",
     }
 
 
@@ -1027,6 +1197,7 @@ def api_captures():
         events = data.get("events", [])
         rssi_values = [pkt.get("rssi", -120) for pkt in packets] + [evt.get("rssi", -120) for evt in events]
         rtl_signals = data.get("rtl_signals", [])
+        quality = _classify_capture(data)
         items.append({
             "id": path.stem,
             "name": data.get("name", path.stem),
@@ -1045,7 +1216,23 @@ def api_captures():
             "folder": data.get("folder", "Previews" if data.get("preview", False) else ""),
             "packets": packets,
             "events": events,
+            "sightings": data.get("sightings", []),
+            "sighting_count": len(data.get("sightings", [])),
+            "quality": quality,
+            "best_replay": _best_replay(data),
+            "replayable": quality["replayable"],
+            "fingerprint": quality["fingerprint"],
         })
+    fingerprint_counts = {}
+    for item in items:
+        fp = item.get("fingerprint")
+        if fp and item.get("quality", {}).get("level") != "empty":
+            fingerprint_counts[fp] = fingerprint_counts.get(fp, 0) + 1
+    for item in items:
+        if item.get("quality", {}).get("level") == "empty":
+            item["duplicate_count"] = 0
+        else:
+            item["duplicate_count"] = max(0, fingerprint_counts.get(item.get("fingerprint"), 0) - 1)
     items.sort(key=lambda item: item.get("ts", 0), reverse=True)
     return jsonify(items)
 
@@ -1121,8 +1308,16 @@ def api_replay():
     path, capture = _read_capture(capture_id)
     if path is None:
         return jsonify({"error": "capture not found"}), 404
+    quality = _classify_capture(capture)
+    if not quality["replayable"]:
+        return jsonify({
+            "error": f"capture is not replayable: {quality['label']}",
+            "quality": quality,
+        }), 400
     packets = capture.get("packets", [])
     indices = body.get("indices", [])
+    if not indices:
+        indices = _best_replay(capture).get("indices", [])
     try:
         selected = [packets[int(idx)] for idx in indices]
         repeat = max(1, min(99, int(body.get("repeat", 1))))

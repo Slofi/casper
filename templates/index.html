@@ -10,11 +10,11 @@
   <header id="toolbar">
     <div class="brand"><span class="brand-icon">C</span><span>CASPER</span></div>
     <nav class="main-tabs" aria-label="Casper tabs">
-      <button class="main-tab active" data-tab="config">CONFIG</button>
-      <button class="main-tab" data-tab="capture">CAPTURE</button>
-      <button class="main-tab" data-tab="decode">DECODE</button>
+      <button class="main-tab active" data-tab="capture">CAPTURE</button>
       <button class="main-tab" data-tab="library">LIBRARY</button>
       <button class="main-tab" data-tab="replay">REPLAY</button>
+      <button class="main-tab" data-tab="decode">DECODE</button>
+      <button class="main-tab" data-tab="config">RADIO</button>
     </nav>
     <div class="spacer"></div>
     <div id="settings-wrap">
@@ -37,7 +37,7 @@
   </header>
 
   <main id="content">
-    <section id="tab-config" class="tab-pane active">
+    <section id="tab-config" class="tab-pane">
       <div class="split">
         <article class="panel">
           <h2>Settings</h2>
@@ -92,36 +92,76 @@
       </div>
     </section>
 
-    <section id="tab-capture" class="tab-pane">
-      <div class="panel">
-        <div class="capture-actions">
-          <button id="start-monitor" class="btn">Monitor</button>
-          <button id="stop-monitor" class="btn" disabled>Stop Monitor</button>
-          <button id="start-auto" class="btn">Auto Arm</button>
-          <button id="stop-auto" class="btn" disabled>Stop Auto</button>
-          <button id="start-capture" class="btn primary">Start</button>
-          <button id="stop-capture" class="btn" disabled>Stop</button>
-          <span id="packet-counter" class="counter">0 packets</span>
+    <section id="tab-capture" class="tab-pane active">
+      <div class="deck-grid">
+        <div class="panel device-panel">
+          <div class="mode-strip">
+            <button class="mode-chip active preset" data-frequency="433.92" type="button">433</button>
+            <button class="mode-chip preset" data-frequency="868.35" type="button">868</button>
+            <button class="mode-chip preset" data-frequency="315.00" type="button">315</button>
+            <button class="mode-chip" data-tab="config" type="button">CUSTOM</button>
+          </div>
+          <div class="screen-readout">
+            <div>
+              <span class="screen-label">Tuned</span>
+              <strong id="capture-frequency-readout">433.92 MHz</strong>
+            </div>
+            <div>
+              <span class="screen-label">Signal</span>
+              <strong id="capture-rssi-readout">-120 dBm</strong>
+            </div>
+            <div>
+              <span class="screen-label">Buffer</span>
+              <strong id="packet-counter">0 packets</strong>
+            </div>
+          </div>
+          <div class="rssi-head"><span>RSSI</span><span id="rssi-value">-120 dBm</span></div>
+          <div class="rssi-track"><div id="rssi-fill" class="rssi-fill"></div></div>
+          <div class="big-actions">
+            <button id="start-auto" class="btn primary command-btn" type="button">ARM</button>
+            <button id="stop-auto" class="btn command-btn" disabled type="button">STOP</button>
+            <button id="show-save" class="btn command-btn" type="button">SAVE</button>
+          </div>
+          <div id="save-form" class="save-inline hidden">
+            <input id="save-name" type="text" placeholder="capture name">
+            <button id="save-capture" class="btn primary">Save</button>
+          </div>
+          <div class="quick-status">
+            <span id="auto-status">Ready</span>
+            <span id="save-message" class="message"></span>
+          </div>
+          <details class="advanced-capture">
+            <summary>Manual tools</summary>
+            <div class="capture-actions">
+              <button id="start-monitor" class="btn">Scope</button>
+              <button id="stop-monitor" class="btn" disabled>Stop Scope</button>
+              <button id="start-capture" class="btn">Raw Capture</button>
+              <button id="stop-capture" class="btn" disabled>Stop Raw</button>
+            </div>
+            <div class="auto-settings">
+              <label>Trigger <input id="auto-threshold" type="number" min="-120" max="0" value="-85"> dBm</label>
+              <label><input id="auto-tune" type="checkbox" checked> Auto tune</label>
+              <label>Margin <input id="auto-margin" type="number" min="3" max="40" value="12"> dB</label>
+              <label>Prebuffer <input id="auto-prebuffer" type="number" min="0" max="10000" step="100" value="3000"> ms</label>
+              <label>Quiet <input id="auto-quiet" type="number" min="300" max="10000" step="100" value="1500"> ms</label>
+            </div>
+          </details>
         </div>
-        <div class="auto-settings">
-          <label>Trigger <input id="auto-threshold" type="number" min="-120" max="0" value="-85"> dBm</label>
-          <label><input id="auto-tune" type="checkbox" checked> Auto tune</label>
-          <label>Margin <input id="auto-margin" type="number" min="3" max="40" value="12"> dB</label>
-          <label>Prebuffer <input id="auto-prebuffer" type="number" min="0" max="10000" step="100" value="3000"> ms</label>
-          <label>Quiet <input id="auto-quiet" type="number" min="300" max="10000" step="100" value="1500"> ms</label>
-          <span id="auto-status">Auto idle</span>
+
+        <div class="panel scope-panel">
+          <div class="signal-head">
+            <span>Scope</span>
+            <span id="signal-peak">Peak -120 dBm</span>
+          </div>
+          <canvas id="signal-canvas" width="900" height="180"></canvas>
+          <div class="signal-scale"><span>-120</span><span>-90</span><span>-60</span><span>-30</span><span>0 dBm</span></div>
         </div>
+      </div>
+
+      <div class="panel preview-panel">
         <div id="capture-error" class="message error"></div>
-        <div class="rssi-head"><span>RSSI</span><span id="rssi-value">-120 dBm</span></div>
-        <div class="rssi-track"><div id="rssi-fill" class="rssi-fill"></div></div>
-        <div class="signal-head">
-          <span>Signal Monitor</span>
-          <span id="signal-peak">Peak -120 dBm</span>
-        </div>
-        <canvas id="signal-canvas" width="900" height="180"></canvas>
-        <div class="signal-scale"><span>-120</span><span>-90</span><span>-60</span><span>-30</span><span>0 dBm</span></div>
         <div class="preview-head">
-          <span>Saved Signal Previews</span>
+          <span>Recent Signals</span>
           <div class="preview-head-actions">
             <button id="refresh-previews" class="btn small" type="button">Refresh</button>
             <button id="clear-previews" class="btn small danger" type="button">Clear All</button>
@@ -129,27 +169,28 @@
         </div>
         <div class="preview-table-wrap">
           <table class="preview-table">
-            <thead><tr><th>#</th><th>Time</th><th>RSSI</th><th>Packets</th><th>Freq</th><th>Decoded</th><th>Note</th><th>Actions</th></tr></thead>
+            <thead><tr><th>#</th><th>Time</th><th>Quality</th><th>RSSI</th><th>Packets</th><th>Freq</th><th>Decoded</th><th>Note</th><th>Actions</th></tr></thead>
             <tbody id="preview-table"></tbody>
           </table>
         </div>
         <div id="preview-empty" class="message">No previews saved yet.</div>
       </div>
 
-      <div class="panel table-panel">
+      <details class="panel table-panel">
+        <summary>Raw packet buffer</summary>
         <table>
-          <thead><tr><th>#</th><th>Time</th><th>RSSI</th><th>Len</th><th>Payload (hex)</th></tr></thead>
+          <thead><tr><th>#</th><th>Time</th><th>RSSI</th><th>Len</th><th>Packet description</th><th>Payload (hex)</th></tr></thead>
           <tbody id="packet-table"></tbody>
         </table>
-      </div>
+      </details>
 
-      <div class="panel save-panel">
-        <button id="show-save" class="btn">Save Capture</button>
-        <div id="save-form" class="inline hidden">
-          <input id="save-name" type="text" placeholder="label">
-          <button id="save-capture" class="btn primary">Save</button>
+      <div class="panel capture-decode-panel">
+        <div class="preview-head">
+          <span>Decoded / Identified</span>
+          <span id="capture-decode-count" class="counter">0 decoded</span>
         </div>
-        <div id="save-message" class="message"></div>
+        <div id="capture-decode-feed" class="decode-feed compact"></div>
+        <div id="capture-decode-empty" class="message">Start Decode + Capture to identify known devices here.</div>
       </div>
     </section>
 
