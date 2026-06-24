@@ -47,6 +47,7 @@ systemctl --user stop casper
 | App | ~/Projects/casper/ |
 | Captures | ~/captures/casper/ |
 | Service | ~/.config/systemd/user/casper.service |
+| GitHub | https://github.com/Slofi/casper |
 
 ## Pending
 
@@ -70,6 +71,7 @@ systemctl --user stop casper
 **2026-06-24** — Claude audit follow-up: `/api/replay` now enforces replayability server-side before TX, so browser-side disabling is no longer the only guard.
 **2026-06-24** — Capture/Decode UX clarification implemented: Capture tab raw packet buffer now includes a `Packet description` column with safe simple labels such as ASCII/text payload, repeated fixed-code style command, repeated payload, raw RF burst, raw/noisy burst, short pulse payload, weak signal, and byte count. A `Decoded / Identified` panel was added to Capture; rtl_433 messages from Decode Only or Decode + Capture are mirrored there while still appearing on the separate Decode tab. Decode tab remains the deeper protocol-identification view for rtl_433-supported devices.
 **2026-06-24** — Best Replay + duplicate handling pass: backend now emits `best_replay` metadata for each capture (`indices`, label, reason) and `/api/replay` uses it by default if no packet selection is supplied. Replay UI selects the recommended payload set and explains why. Auto previews now merge into an existing preview with the same signal fingerprint when still in Previews, recording `sightings` instead of filling the list with duplicate rows; UI shows merged `Seen Nx` badges.
+**2026-06-24** — GitHub save checkpoint: rebased over remote `main` checkpoint and pushed to `Slofi/casper` on `main` at commit `2920798` (`Improve capture automation and validation UX`). Working tree clean after push.
 **2026-06-08** — Session checkpoint saved on Testbox: Capture tab has Saved Signal Previews table with decoded summary and per-preview notes; Auto Arm saves decoded and RSSI-only previews; Library has folders/notes; DECODE tab implementation is present in working tree. CD went offline during deploy, so re-sync/restart CD when back online. Current save commit pending/pushed from Testbox after this checkpoint.
 **2026-06-08** — rtl_433 confirmed installed (v23.11), DECODE tab brief written; custom confirm modal + preview UX polish (session 328)
 **2026-06-08** — CC1101 replacement wired + verified, SPI permissions fixed, launcher tile added (session 328)
