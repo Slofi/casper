@@ -947,17 +947,20 @@ async function updateApp() {
   }
 }
 
+function showServiceSplash(mode) {
+  const el = $("service-splash");
+  if (!el) return;
+  el.dataset.mode = mode || 'restart';
+  el.removeAttribute('hidden');
+}
+
 async function restartApp() {
   if (!await customConfirm("Restart Casper now? The page will reload after the service comes back.", "Restart")) return;
-  const btn = $("restart-app");
-  btn.disabled = true;
-  setMessage("update-status", "Restarting Casper service...");
+  showServiceSplash('restart');
   try {
     await api("/api/service/restart", { method: "POST" });
-    setTimeout(() => window.location.reload(), 3500);
   } catch (err) {
-    btn.disabled = false;
-    setMessage("update-status", `Restart failed: ${err.message}`, true);
+    /* service restarting, ignore */
   }
 }
 
